@@ -2,11 +2,10 @@
 
 use std::collections::HashMap;
 
-<<<<<<< HEAD
-use crate::model::{HealthInfo, KvData, MintedToken, SecretEntry, TokenInfo, WrappedToken};
-=======
-use crate::model::{HealthInfo, KvData, PolicyDocument, PolicyEntry, SecretEntry, TokenInfo};
->>>>>>> origin/main
+use crate::model::{
+    HealthInfo, KvData, MintedToken, PolicyDocument, PolicyEntry, SecretEntry, TokenInfo,
+    TokenInfo, WrappedToken,
+};
 use crate::path::SecretPath;
 
 /// Composite key for a cached listing: mount engine plus relative KV path.
@@ -119,7 +118,6 @@ pub enum Msg {
         /// Cache key of the created secret.
         key: CacheKey,
     },
-<<<<<<< HEAD
     /// The active token was renewed successfully.
     TokenRenewed {
         /// Generation stamped when the background task was spawned.
@@ -154,7 +152,7 @@ pub enum Msg {
         can_create: bool,
         /// Whether the token may wrap data (`sys/wrapping/wrap`).
         can_wrap: bool,
-=======
+    },
     /// ACL policy list was loaded.
     PoliciesLoaded {
         /// Generation stamped when the background task was spawned.
@@ -186,7 +184,6 @@ pub enum Msg {
         name: String,
         /// Whether this policy is writable.
         writable: bool,
->>>>>>> origin/main
     },
 }
 
@@ -246,16 +243,13 @@ impl Store {
             | Msg::Capabilities { .. }
             | Msg::SecretCreated { .. }
             | Msg::SecretDeleted { .. }
-<<<<<<< HEAD
             | Msg::TokenRenewed { .. }
             | Msg::TokenMinted { .. }
             | Msg::DataWrapped { .. }
             | Msg::DataUnwrapped { .. }
-            | Msg::TokenCapabilities { .. } => true,
-=======
+            | Msg::TokenCapabilities { .. }
             | Msg::PolicyWritten { .. }
             | Msg::PolicyCapabilities { .. } => true,
->>>>>>> origin/main
             Msg::HardRefreshed { key, .. } => {
                 self.secrets.remove(&key);
                 true
