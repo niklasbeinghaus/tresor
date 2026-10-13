@@ -20,7 +20,8 @@ jobs:
         include:
           - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
-          - { runner: macos-13, target: x86_64-apple-darwin }
+          # macOS 13 (Intel) runners are retired — cross-compile x86_64 from the arm64 runner.
+          - { runner: macos-latest, target: x86_64-apple-darwin }
           - { runner: macos-latest, target: aarch64-apple-darwin }
           - { runner: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
@@ -89,7 +90,7 @@ jobs:
           declare -A ARCH=( [amd64]="x86_64-unknown-linux-gnu" [arm64]="aarch64-unknown-linux-gnu" )
           for arch in "${!ARCH[@]}"; do
             target="${ARCH[$arch]}"
-            cp "artifacts/linux-${target}/tresor-${target}" "./tresor-linux-${arch}"
+            cp "artifacts/linux-${target}/tresor-${target}" "./tresor-linux-bin"
             for packager in deb rpm apk; do
               NFPM_ARCH="$arch" NFPM_VERSION="$VERSION" \
                 nfpm package --packager "$packager" --config nfpm.yaml \

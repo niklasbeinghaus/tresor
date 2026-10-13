@@ -78,8 +78,8 @@ empty_enums = "warn"      # public enums should consider #[non_exhaustive]
 # NOTE: pinned to the ratatui 0.29 / crossterm 0.28 ecosystem because
 # tui-textarea 0.7 (the last published version) requires them; mixing in
 # ratatui 0.30 would silently break widget type compatibility.
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
 tokio = { version = "1", features = ["full"] }
 vaultrs = "0.8"
 tui-textarea = "0.7"
@@ -89,7 +89,8 @@ copypasta = "0.10"
 # gateways behave differently per HTTP version — HTTP/2 + compression must be
 # on (the Go client negotiates h2 by default; h1-only requests got 400s).
 reqwest = { version = "0.13", default-features = false, features = [
-    "rustls-tls",
+    # reqwest 0.13 renamed `rustls-tls` to `rustls`.
+    "rustls",
     "json",
     "http2",
     "gzip",

@@ -6,7 +6,7 @@
   "architecture": {
     "64bit": {
       "url": "https://github.com/njoerd114/tresor/releases/download/v0.1.0/tresor-x86_64-pc-windows-msvc.zip",
-      "hash": "REPLACE_WITH_SHA256_FROM_RELEASE"
+      "hash": "19c183449165bdc90b1a9b3e00cc025f183d823631db1fe2eb73bddc251f55eb"
     }
   },
   "bin": "tresor-x86_64-pc-windows-msvc.exe",

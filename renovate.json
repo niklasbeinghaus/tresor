@@ -1,6 +1,24 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
+  "extends": ["config:recommended"],
+  "automerge": false,
+  "packageRules": [
+    {
+      "description": "tui-textarea 0.7 (latest) pins ratatui 0.29 / crossterm 0.28 — never bump these independently",
+      "matchPackageNames": ["ratatui", "crossterm", "tui-textarea"],
+      "allowedVersions": "/^(ratatui@?0\\.29|0\\.29|crossterm@?0\\.28|0\\.28|tui-textarea@?0\\.7|0\\.7)/",
+      "automerge": false
+    },
+    {
+      "description": "Dependency upgrades need review: our client relies on specific features/response shapes",
+      "matchManagers": ["cargo"],
+      "automerge": false,
+      "addLabels": ["dependencies"]
+    },
+    {
+      "description": "Group and require dashboard approval for major bumps",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    }
   ]
 }
