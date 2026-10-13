@@ -4,21 +4,22 @@
   "automerge": false,
   "packageRules": [
     {
-      "description": "tui-textarea 0.7 (latest) pins ratatui 0.29 / crossterm 0.28 — never bump these independently",
-      "matchPackageNames": ["ratatui", "crossterm", "tui-textarea"],
-      "allowedVersions": "/^(ratatui@?0\\.29|0\\.29|crossterm@?0\\.28|0\\.28|tui-textarea@?0\\.7|0\\.7)/",
+      "description": "The ratatui ecosystem must move together: ratatui-textarea tracks ratatui-core, which ratatui re-exports.",
+      "matchPackageNames": ["ratatui", "ratatui-core", "ratatui-widgets", "ratatui-crossterm", "ratatui-textarea", "crossterm"],
+      "groupName": "ratatui ecosystem",
       "automerge": false
     },
     {
-      "description": "Dependency upgrades need review: our client relies on specific features/response shapes",
+      "description": "Dependency upgrades need review: the Vault client depends on specific reqwest feature names and response shapes.",
       "matchManagers": ["cargo"],
       "automerge": false,
       "addLabels": ["dependencies"]
     },
     {
-      "description": "Group and require dashboard approval for major bumps",
+      "description": "Major version bumps are breaking by definition and must not land unattended.",
       "matchUpdateTypes": ["major"],
-      "dependencyDashboardApproval": true
+      "dependencyDashboardApproval": true,
+      "automerge": false
     }
   ]
 }

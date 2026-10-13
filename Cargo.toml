@@ -75,14 +75,15 @@ empty_structs_with_brackets = "warn"
 empty_enums = "warn"      # public enums should consider #[non_exhaustive]
 
 [dependencies]
-# NOTE: pinned to the ratatui 0.29 / crossterm 0.28 ecosystem because
-# tui-textarea 0.7 (the last published version) requires them; mixing in
-# ratatui 0.30 would silently break widget type compatibility.
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
+# ratatui 0.30 / crossterm 0.29 ecosystem.
+# `tui-textarea` 0.7 is pinned to ratatui 0.29 (unmaintained), so the editor
+# widget comes from the community fork `ratatui-textarea`, which tracks
+# ratatui-core 0.1.x (the crate ratatui 0.30 is built on) with an identical API.
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
 tokio = { version = "1", features = ["full"] }
 vaultrs = "0.8"
-tui-textarea = "0.7"
+ratatui-textarea = "0.9"
 copypasta = "0.10"
 # Direct HTTP for the lenient `/v1/sys/health` probe and KV2 list/read:
 # OpenBao omits/`null`s fields vaultrs requires strictly, and production

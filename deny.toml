@@ -2,12 +2,6 @@
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = [
-    # RUSTSEC-2024-0436: `paste` (getset-proc-macro feature of `ratatui` 0.29)
-    # is archived/unmaintained. No fixed version exists; it is a build-time
-    # macro-only crate pinned by tui-textarea 0.7 (which pins ratatui 0.29).
-    "RUSTSEC-2024-0436",
-]
 
 [licenses]
 allow = [

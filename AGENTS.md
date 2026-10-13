@@ -4,7 +4,7 @@
 **Repo:** vaultview-rs (Rust rewrite of the Go vaultview TUI)
 
 ## OVERVIEW
-Rust TUI for HashiCorp Vault and OpenBao — a k9s-style terminal UI (~3k LOC, 18 crates in `src/`). Stack: `ratatui` 0.29 + `crossterm` 0.28 + `tokio` 1.x + `vaultrs` 0.8 (+ `reqwest` for the lenient health probe). Architecture mirrors sofka (Rust k9s): async-first `select!` event loop, single `Mode` enum, `Msg`-over-`mpsc` with generation tags, small in-memory `Store`. **KV2 secret engines only.**
+Rust TUI for HashiCorp Vault and OpenBao — a k9s-style terminal UI (~3k LOC, 18 crates in `src/`). Stack: `ratatui` 0.30 + `crossterm` 0.29 + `tokio` 1.x + `vaultrs` 0.8 (+ `reqwest` for the lenient health probe). Architecture mirrors sofka (Rust k9s): async-first `select!` event loop, single `Mode` enum, `Msg`-over-`mpsc` with generation tags, small in-memory `Store`. **KV2 secret engines only.**
 
 ## STRUCTURE
 ```
@@ -68,7 +68,7 @@ scripts/dev-vault.sh + seed-vault.sh  # local `vault server -dev` + KV2 seed dat
 - **No async-trait, no `Box<dyn VaultApi>`** (object-safety). Use generics.
 - **No `unwrap`/`expect`/`panic`/`indexing` in prod code** — strict lints deny them; `rows[i]` must be destructured via slice patterns.
 - **Do not soften the Cargo lints** (`-D warnings` gate): `missing_docs`, `doc_markdown` (backtick `CamelCase`/snake_case in docs), `exhaustive_structs/enums` allowed project-wide (bin+lib same package).
-- `ratatui`/`crossterm` are pinned to 0.29/0.28 — **tui-textarea 0.7 requires them**; upgrading ratatui to 0.30 silently breaks widget type compatibility.
+- `ratatui` 0.30 / `crossterm` 0.29. The editor widget is `ratatui-textarea` — the maintained fork of `tui-textarea` 0.7, which is pinned to `ratatui` 0.29 (unmaintained) and must **not** be reintroduced; it would drag in a second `ratatui` and silently break widget type compatibility.
 - Don't touch Cargo.toml deps without running `cargo machete` (unused-dep gate).
 - No `serde` derive needed (client maps manually); `serde_json::Value` only at the vault boundary.
 
