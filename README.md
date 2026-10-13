@@ -20,6 +20,10 @@ supports **KV2 secret engines only** (same as the Go version).
 - `<e>` edit secret value (inline textarea), `Ctrl+S` save
 - `<c>` copy secret value to the system clipboard
 - `Ctrl+R` hard reload of the current path (with 404 backtrack)
+- Token inspector (`:token`): `lookup-self` details, renew-self, and child-token
+  creation (policies + TTL + use limit) — the minted token is shown once and copyable
+- Response wrapping: `:unwrap` a wrapping token into a pretty-printed payload, or
+  `:wrap` a JSON payload with an optional TTL
 - Vault header: address, sealed state, version, token policies/expiry
 - Config modal when `VAULT_ADDR`/`VAULT_TOKEN` are missing
 - Color-coded status line (errors/errors/info/success, auto-clear after 5s)
@@ -47,6 +51,12 @@ tracked with their reasoning in [`docs/out-of-scope.md`](docs/out-of-scope.md).
 | `a` | add key to the open secret (when permitted) |
 | `Ctrl+S` | save edits |
 | `Ctrl+R` | hard refresh current path |
+| `:` | command palette (`token`, `t`, `unwrap`, `u`, `wrap`, `w`) |
+| `r` | renew the active token (token inspector) |
+| `n` | create a child token (token inspector, when permitted) |
+| `w` | wrap a JSON payload (token inspector, when permitted) |
+| `u` | unwrap a wrapping token (token inspector) |
+| `c` | copy the shown token/payload (token inspector) |
 | `Ctrl+C` | quit |
 
 ## Install
