@@ -1,0 +1,16 @@
+---
+source: src/ui/contexts.rs
+expression: output
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+             ┌Contexts (type to filter)──────────────────────────┐              
+             │/ filter                                           │              
+             │enter switch │ esc cancel                          │              
+             │(no profiles configured)                           │              
+             └───────────────────────────────────────────────────┘

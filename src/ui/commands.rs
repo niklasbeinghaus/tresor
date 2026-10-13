@@ -113,6 +113,25 @@ impl Permission {
     }
 }
 
+/// Optional transient input or status rendered in place of the key hints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandBarInput<'a> {
+    /// The `:` command palette is capturing input.
+    Command {
+        /// Text typed after `:`.
+        input: &'a str,
+    },
+    /// A list filter is active; show the query and match count.
+    Filter {
+        /// Filter query typed after `/`.
+        query: &'a str,
+        /// Number of rows matching the query.
+        matched: usize,
+        /// Total number of rows in the focused list.
+        total: usize,
+    },
+}
+
 /// Draws the one-row command bar: key hints left, page title right.
 pub fn draw_commands(
     frame: &mut Frame<'_>,
@@ -121,23 +140,51 @@ pub fn draw_commands(
     permission: Permission,
     theme: &Theme,
 ) {
-    let mut left = Vec::new();
+    draw_commands_with_input(frame, area, page, permission, None, theme);
+}
+
+/// Draws the command bar, replacing the key hints with the active `:` command
+/// input or `/` filter status when one is given.
+pub fn draw_commands_with_input(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    page: Page,
+    permission: Permission,
+    input: Option<CommandBarInput<'_>>,
+    theme: &Theme,
+) {
+    let line = match input {
+        Some(CommandBarInput::Command { input }) => command_line(input, theme),
+        Some(CommandBarInput::Filter {
+            query,
+            matched,
+            total,
+        }) => filter_line(query, matched, total, theme),
+        None => hints_line(page, permission, area, theme),
+    };
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().bg(theme.selected_bg)),
+        area,
+    );
+}
+
+fn hints_line(page: Page, permission: Permission, area: Rect, theme: &Theme) -> Line<'static> {
+    let mut spans = Vec::new();
     let mut left_width = 0usize;
     for (index, (key, action)) in page.hints(permission).iter().enumerate() {
         if index > 0 {
-            left.push(Span::raw(" │ "));
+            spans.push(Span::raw(" │ "));
             left_width += 3;
         }
-        left.push(Span::styled(
+        spans.push(Span::styled(
             *key,
             Style::default()
                 .fg(theme.title)
                 .add_modifier(Modifier::BOLD),
         ));
-        left.push(Span::raw(format!(" {action}")));
+        spans.push(Span::raw(format!(" {action}")));
         left_width += key.len() + 1 + action.len();
     }
-    let mut spans = left;
     let title = page.title();
     let pad = usize::from(area.width).saturating_sub(left_width + title.len());
     spans.push(Span::raw(" ".repeat(pad)));
@@ -147,11 +194,37 @@ pub fn draw_commands(
             .fg(theme.title)
             .add_modifier(Modifier::BOLD),
     ));
-    let line = Line::from(spans);
-    frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(theme.selected_bg)),
-        area,
-    );
+    Line::from(spans)
+}
+
+fn command_line(input: &str, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            ":",
+            Style::default()
+                .fg(theme.title)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(input.to_owned(), Style::default().fg(theme.selected_fg)),
+        Span::styled("█", Style::default().fg(theme.title)),
+    ])
+}
+
+fn filter_line(query: &str, matched: usize, total: usize, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            "/",
+            Style::default()
+                .fg(theme.title)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(query.to_owned(), Style::default().fg(theme.selected_fg)),
+        Span::styled("█", Style::default().fg(theme.title)),
+        Span::styled(
+            format!("  {matched}/{total} matches"),
+            Style::default().fg(theme.masked_fg),
+        ),
+    ])
 }
 
 #[cfg(test)]
@@ -260,5 +333,70 @@ mod tests {
         assert!(full.iter().any(|(_, action)| *action == "delete"));
         assert!(!data_readonly.iter().any(|(_, action)| *action == "add key"));
         assert!(data_writable.iter().any(|(_, action)| *action == "add key"));
+    }
+
+    fn render_input(width: u16, height: u16, page: Page, input: CommandBarInput<'_>) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("TestBackend");
+        terminal
+            .draw(|frame| {
+                draw_commands_with_input(
+                    frame,
+                    Rect::new(0, 0, width, height),
+                    page,
+                    Permission::read_only(),
+                    Some(input),
+                    &Theme::default(),
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(
+                    buffer
+                        .cell((x, y))
+                        .map_or("", ratatui::buffer::Cell::symbol),
+                );
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn commands_bar_shows_command_prompt_when_command_input_active() {
+        // Given: the `:` command palette is capturing input.
+        let output = render_input(
+            100,
+            1,
+            Page::Engines,
+            CommandBarInput::Command { input: "ctx" },
+        );
+
+        // Then: the bar shows the prompt instead of the key hints.
+        assert_snapshot!("commands_command_input", output);
+        assert!(output.contains(":ctx"));
+    }
+
+    #[test]
+    fn commands_bar_shows_match_count_when_filter_active() {
+        // Given: an active `/` filter over the secrets list.
+        let output = render_input(
+            100,
+            1,
+            Page::Secrets,
+            CommandBarInput::Filter {
+                query: "ap",
+                matched: 3,
+                total: 12,
+            },
+        );
+
+        // Then: the query and match count are shown.
+        assert_snapshot!("commands_filter_status", output);
+        assert!(output.contains("/ap"));
+        assert!(output.contains("3/12 matches"));
     }
 }

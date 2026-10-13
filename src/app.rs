@@ -14,15 +14,19 @@ use tokio::sync::mpsc;
 use crate::clipboard::{TextClipboard, default_clipboard};
 use crate::config::Config;
 use crate::constants::{NA_VALUE, STATUS_EXPIRY_SECS, keys};
+use crate::fuzzy;
 use crate::model::{HealthInfo, KvData, SecretEntry, TokenInfo};
 use crate::path::SecretPath;
+use crate::profiles::{ConnectRequest, Profile, Profiles};
 use crate::state::Mode;
 use crate::store::{CacheKey, Msg, Store};
 use crate::theme::Theme;
-use crate::ui::commands::{Page, Permission, draw_commands};
+use crate::ui::commands::{CommandBarInput, Page, Permission, draw_commands_with_input};
+use crate::ui::contexts::{ContextRow, ContextsModel, draw_contexts};
 use crate::ui::engines::{EnginesModel, draw_engines};
 use crate::ui::header::{HeaderModel, StatusKind, StatusLine, draw_header};
 use crate::ui::modal::{ModalField, ModalModel, draw_modal};
+use crate::ui::palette::{PaletteModel, PaletteRow, draw_palette};
 use crate::ui::prompt::{PromptKind, PromptModel, draw_prompt};
 use crate::ui::secret_data::{DataMode, KeyRow, SecretDataModel, draw_secret_data};
 use crate::ui::secrets::{SecretsModel, draw_secrets, sort_entries};
@@ -44,6 +48,97 @@ pub struct PromptState {
     /// Optional error (e.g. empty name, permission denied).
     pub error: Option<String>,
 }
+
+/// An active overlay drawn above the current page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Overlay {
+    /// State for the `:` command palette.
+    Command(PaletteState),
+    /// State for the `:ctx` connection picker.
+    Contexts(ContextsState),
+}
+
+/// State of the `:` command palette overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteState {
+    /// Query typed after `:`.
+    pub input: String,
+    /// Selected command index.
+    pub selected: usize,
+}
+
+/// State of the `:ctx` connection picker overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextsState {
+    /// Type-to-filter query.
+    pub filter: String,
+    /// Selected profile index.
+    pub selected: usize,
+}
+
+/// Identity of the list a `/` filter applies to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterScope {
+    /// Engines list.
+    Engines,
+    /// Secrets list under a mount/path.
+    Secrets {
+        /// Selected mount.
+        mount: SecretPath,
+        /// Current directory path.
+        path: SecretPath,
+    },
+    /// Key list in the secret-data page.
+    SecretData {
+        /// Selected mount.
+        mount: SecretPath,
+        /// Open secret path.
+        path: SecretPath,
+    },
+}
+
+/// Active `/` filter (presentation-only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterState {
+    /// Filter scope identity.
+    pub scope: FilterScope,
+    /// Query entered after `/`.
+    pub query: String,
+    /// Whether query editing is active.
+    pub editing: bool,
+}
+
+/// A command in the `:` palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteCommand {
+    Contexts,
+    Filter,
+    Quit,
+}
+
+impl PaletteCommand {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Contexts => "ctx",
+            Self::Filter => "filter",
+            Self::Quit => "quit",
+        }
+    }
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Contexts => "switch connection context",
+            Self::Filter => "filter the focused list",
+            Self::Quit => "exit tresor",
+        }
+    }
+}
+
+const PALETTE_COMMANDS: [PaletteCommand; 3] = [
+    PaletteCommand::Contexts,
+    PaletteCommand::Filter,
+    PaletteCommand::Quit,
+];
 
 /// Header information loaded from Vault after connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +223,10 @@ pub struct App<V: VaultApi> {
     pub can_delete: bool,
     /// Active input prompt, if any.
     pub prompt: Option<PromptState>,
+    /// Active overlay drawn above the current view.
+    pub overlay: Option<Overlay>,
+    /// Active presentation-only filter for the focused list.
+    pub filter: Option<FilterState>,
     modal_addr: String,
     modal_token: String,
     modal_focus: ModalField,
@@ -135,6 +234,9 @@ pub struct App<V: VaultApi> {
     status_at: Option<Instant>,
     tx: mpsc::UnboundedSender<Msg>,
     clipboard: Box<dyn TextClipboard>,
+    profiles: Profiles,
+    pending_connect: Option<ConnectRequest>,
+    current_profile: Option<String>,
 }
 
 impl<V: VaultApi> std::fmt::Debug for App<V> {
@@ -220,6 +322,8 @@ impl<V: VaultApi + 'static> App<V> {
                 can_write: false,
                 can_delete: false,
                 prompt: None,
+                overlay: None,
+                filter: None,
                 modal_addr: String::new(),
                 modal_token: String::new(),
                 modal_focus: ModalField::Addr,
@@ -227,6 +331,9 @@ impl<V: VaultApi + 'static> App<V> {
                 status_at: None,
                 tx,
                 clipboard: default_clipboard(),
+                profiles: Profiles::default(),
+                pending_connect: None,
+                current_profile: None,
             },
             rx,
         )
@@ -239,12 +346,45 @@ impl<V: VaultApi + 'static> App<V> {
         self
     }
 
+    /// Replaces the loaded profile set used by `:ctx`.
+    #[must_use]
+    pub fn with_profiles(mut self, profiles: Profiles) -> Self {
+        self.profiles = profiles;
+        self
+    }
+
+    /// Takes and clears the pending reconnect request.
+    pub const fn take_pending_connect(&mut self) -> Option<ConnectRequest> {
+        self.pending_connect.take()
+    }
+
+    /// Sets the currently connected profile name.
+    pub fn set_current_profile(&mut self, name: Option<String>) {
+        self.current_profile = name;
+    }
+
+    /// Reports a runtime error via the status line.
+    pub fn report_error(&mut self, message: impl Into<String>) {
+        self.set_status(StatusKind::Error, message);
+    }
+
     /// Replaces the connection after modal submission and starts initial loads.
     pub fn connect_config(&mut self, config: Config, vault: Arc<V>) {
         self.config = config;
         self.vault = vault;
         self.state = AppState::Main(Mode::Engines);
         self.modal_error = None;
+        self.store.clear_cached_data_preserving_generation();
+        self.info = None;
+        self.secret_data = None;
+        self.engines_selected = 0;
+        self.secrets_selected = 0;
+        self.secrets_path = SecretPath::root();
+        self.secrets_engine = SecretPath::root();
+        self.can_write = false;
+        self.can_delete = false;
+        self.filter = None;
+        self.overlay = None;
         self.spawn_initial_loads();
     }
 
@@ -294,12 +434,345 @@ impl<V: VaultApi + 'static> App<V> {
         if self.prompt.is_some() {
             return self.handle_prompt_input(key);
         }
+        if self.overlay.is_some() {
+            return self.handle_overlay_input(key);
+        }
+        if self.filter.as_ref().is_some_and(|state| state.editing) {
+            return self.handle_filter_input(key);
+        }
+        if key.code == KeyCode::Esc
+            && self
+                .filter
+                .as_ref()
+                .is_some_and(|state| state.scope == self.current_filter_scope())
+        {
+            self.filter = None;
+            return false;
+        }
+        if matches!(self.state, AppState::Main(_)) && !self.inside_secret_editor() {
+            if key.code == KeyCode::Char(':') {
+                self.open_command_palette();
+                return false;
+            }
+            if key.code == KeyCode::Char('/') && !matches!(self.state, AppState::Main(Mode::Config))
+            {
+                self.open_filter();
+                return false;
+            }
+        }
         match self.state {
             AppState::ConfigInput => self.handle_config_input(key),
             AppState::Main(Mode::Config) => false,
             AppState::Main(Mode::Engines) => self.handle_engines_input(key),
             AppState::Main(Mode::Secrets) => self.handle_secrets_input(key),
             AppState::Main(Mode::SecretData) => self.handle_secret_data_input(key),
+        }
+    }
+
+    fn handle_overlay_input(&mut self, key: KeyEvent) -> bool {
+        match self.overlay.clone() {
+            Some(Overlay::Command(state)) => self.handle_palette_input(key, state),
+            Some(Overlay::Contexts(state)) => self.handle_contexts_input(key, state),
+            None => false,
+        }
+    }
+
+    fn handle_palette_input(&mut self, key: KeyEvent, mut state: PaletteState) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.overlay = None;
+                return false;
+            }
+            KeyCode::Enter => {
+                let matches = Self::palette_matches(&state.input);
+                let Some(command) = matches.get(state.selected).copied() else {
+                    self.overlay = Some(Overlay::Command(state));
+                    return false;
+                };
+                return self.run_palette_command(command);
+            }
+            KeyCode::Up => {
+                state.selected = state.selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                let len = Self::palette_matches(&state.input).len();
+                state.selected = next_index(state.selected, len);
+            }
+            KeyCode::Backspace => {
+                state.input.pop();
+                state.selected = 0;
+            }
+            KeyCode::Char(ch) => {
+                state.input.push(ch);
+                state.selected = 0;
+            }
+            _ => {}
+        }
+        self.overlay = Some(Overlay::Command(state));
+        false
+    }
+
+    fn handle_contexts_input(&mut self, key: KeyEvent, mut state: ContextsState) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.overlay = None;
+                return false;
+            }
+            KeyCode::Enter => {
+                if let Some(profile) = self
+                    .contexts_matches(&state.filter)
+                    .get(state.selected)
+                    .copied()
+                {
+                    self.pending_connect = Some(profile.to_request());
+                    self.overlay = None;
+                    return false;
+                }
+            }
+            KeyCode::Up => {
+                state.selected = state.selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                let len = self.contexts_matches(&state.filter).len();
+                state.selected = next_index(state.selected, len);
+            }
+            KeyCode::Backspace => {
+                state.filter.pop();
+                state.selected = 0;
+            }
+            KeyCode::Char(ch) => {
+                state.filter.push(ch);
+                state.selected = 0;
+            }
+            _ => {}
+        }
+        self.overlay = Some(Overlay::Contexts(state));
+        false
+    }
+
+    fn open_command_palette(&mut self) {
+        self.overlay = Some(Overlay::Command(PaletteState {
+            input: String::new(),
+            selected: 0,
+        }));
+    }
+
+    fn open_contexts(&mut self) {
+        self.overlay = Some(Overlay::Contexts(ContextsState {
+            filter: String::new(),
+            selected: 0,
+        }));
+    }
+
+    fn run_palette_command(&mut self, cmd: PaletteCommand) -> bool {
+        self.overlay = None;
+        match cmd {
+            PaletteCommand::Contexts => {
+                self.open_contexts();
+                false
+            }
+            PaletteCommand::Filter => {
+                self.open_filter();
+                false
+            }
+            PaletteCommand::Quit => true,
+        }
+    }
+
+    fn palette_matches(input: &str) -> Vec<PaletteCommand> {
+        let labels: Vec<&str> = PALETTE_COMMANDS
+            .iter()
+            .map(|command| command.label())
+            .collect();
+        fuzzy::ranked_indices(&labels, input)
+            .into_iter()
+            .filter_map(|index| PALETTE_COMMANDS.get(index).copied())
+            .collect()
+    }
+
+    fn contexts_matches(&self, filter: &str) -> Vec<&Profile> {
+        let labels = self.profiles.names();
+        fuzzy::ranked_indices(&labels, filter)
+            .into_iter()
+            .filter_map(|index| self.profiles.profiles.get(index))
+            .collect()
+    }
+
+    fn current_filter_scope(&self) -> FilterScope {
+        match self.state {
+            AppState::Main(Mode::Secrets) => FilterScope::Secrets {
+                mount: self.secrets_engine.clone(),
+                path: self.secrets_path.clone(),
+            },
+            AppState::Main(Mode::SecretData) => {
+                let path = self
+                    .secret_data
+                    .as_ref()
+                    .map_or_else(|| self.secrets_path.clone(), |ui| ui.key.clone());
+                FilterScope::SecretData {
+                    mount: self.secrets_engine.clone(),
+                    path,
+                }
+            }
+            AppState::ConfigInput | AppState::Main(Mode::Config | Mode::Engines) => {
+                FilterScope::Engines
+            }
+        }
+    }
+
+    fn open_filter(&mut self) {
+        let scope = self.current_filter_scope();
+        let query = self
+            .filter
+            .as_ref()
+            .and_then(|state| {
+                if state.scope == scope {
+                    Some(state.query.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+        self.filter = Some(FilterState {
+            scope,
+            query,
+            editing: true,
+        });
+    }
+
+    fn handle_filter_input(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.filter = None;
+            }
+            KeyCode::Enter => {
+                if let Some(filter) = self.filter.as_mut() {
+                    filter.editing = false;
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(filter) = self.filter.as_mut() {
+                    filter.query.pop();
+                }
+                self.reset_selection();
+            }
+            KeyCode::Char(ch) => {
+                if let Some(filter) = self.filter.as_mut() {
+                    filter.query.push(ch);
+                }
+                self.reset_selection();
+            }
+            _ => {}
+        }
+        false
+    }
+
+    const fn reset_selection(&mut self) {
+        match self.state {
+            AppState::Main(Mode::Engines) => self.engines_selected = 0,
+            AppState::Main(Mode::Secrets) => self.secrets_selected = 0,
+            AppState::Main(Mode::SecretData) => {
+                if let Some(ui) = self.secret_data.as_mut() {
+                    ui.selected = 0;
+                }
+            }
+            AppState::ConfigInput | AppState::Main(Mode::Config) => {}
+        }
+    }
+
+    fn filter_strings(&self, scope: &FilterScope, items: &[String]) -> Vec<String> {
+        let Some(filter) = &self.filter else {
+            return items.to_vec();
+        };
+        if filter.scope != *scope || filter.query.is_empty() {
+            return items.to_vec();
+        }
+        let labels: Vec<&str> = items.iter().map(String::as_str).collect();
+        fuzzy::ranked_indices(&labels, &filter.query)
+            .into_iter()
+            .filter_map(|index| items.get(index).cloned())
+            .collect()
+    }
+
+    fn filter_entries(&self, scope: &FilterScope, entries: &[SecretEntry]) -> Vec<SecretEntry> {
+        let Some(filter) = &self.filter else {
+            return entries.to_vec();
+        };
+        if filter.scope != *scope || filter.query.is_empty() {
+            return entries.to_vec();
+        }
+        let labels: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        fuzzy::ranked_indices(&labels, &filter.query)
+            .into_iter()
+            .filter_map(|index| entries.get(index).cloned())
+            .collect()
+    }
+
+    fn filtered_data_keys(&self) -> Vec<String> {
+        let Some(ui) = self.secret_data.as_ref() else {
+            return Vec::new();
+        };
+        let scope = FilterScope::SecretData {
+            mount: self.secrets_engine.clone(),
+            path: ui.key.clone(),
+        };
+        let keys: Vec<String> = ui.data.data.keys().cloned().collect();
+        self.filter_strings(&scope, &keys)
+    }
+
+    fn current_list_counts(&self) -> (usize, usize) {
+        match self.state {
+            AppState::Main(Mode::Engines) => (
+                self.engines_model().engines.len(),
+                self.store.engines().len(),
+            ),
+            AppState::Main(Mode::Secrets) => {
+                let total = self
+                    .store
+                    .secrets(&self.current_secrets_key())
+                    .map_or(0, <[SecretEntry]>::len);
+                (self.secrets_model().entries.len(), total)
+            }
+            AppState::Main(Mode::SecretData) => {
+                let total = self.secret_data.as_ref().map_or(0, |ui| ui.data.data.len());
+                (self.filtered_data_keys().len(), total)
+            }
+            AppState::ConfigInput | AppState::Main(Mode::Config) => (0, 0),
+        }
+    }
+
+    fn palette_model(state: &PaletteState) -> PaletteModel {
+        let rows: Vec<PaletteRow> = Self::palette_matches(&state.input)
+            .into_iter()
+            .map(|command| PaletteRow {
+                label: command.label().to_owned(),
+                description: command.description().to_owned(),
+            })
+            .collect();
+        let selected = state.selected.min(rows.len().saturating_sub(1));
+        PaletteModel {
+            query: state.input.clone(),
+            rows,
+            selected,
+        }
+    }
+
+    fn contexts_model(&self, state: &ContextsState) -> ContextsModel {
+        let rows: Vec<ContextRow> = self
+            .contexts_matches(&state.filter)
+            .into_iter()
+            .map(|profile| ContextRow {
+                name: profile.name.clone(),
+                addr: profile.addr.clone(),
+                current: self.current_profile.as_deref() == Some(profile.name.as_str()),
+            })
+            .collect();
+        let selected = state.selected.min(rows.len().saturating_sub(1));
+        ContextsModel {
+            rows,
+            selected,
+            filter: state.filter.clone(),
+            error: None,
         }
     }
 
@@ -429,24 +902,47 @@ impl<V: VaultApi + 'static> App<V> {
         }
     }
 
+    /// Optional command bar input (either `:` command text or `/` filter status).
+    pub fn command_bar_input(&self) -> Option<CommandBarInput<'_>> {
+        if let Some(Overlay::Command(state)) = &self.overlay {
+            return Some(CommandBarInput::Command {
+                input: state.input.as_str(),
+            });
+        }
+        let filter = self.filter.as_ref()?;
+        if filter.scope == self.current_filter_scope() {
+            let (matched, total) = self.current_list_counts();
+            return Some(CommandBarInput::Filter {
+                query: filter.query.as_str(),
+                matched,
+                total,
+            });
+        }
+        None
+    }
+
     /// Builds the pure engines render model.
     pub fn engines_model(&self) -> EnginesModel {
         EnginesModel {
-            engines: self.store.engines().to_vec(),
+            engines: self.filter_entries(&FilterScope::Engines, self.store.engines()),
             selected: self.engines_selected,
         }
     }
 
     /// Builds the pure secrets render model.
     pub fn secrets_model(&self) -> SecretsModel {
-        let entries = self
+        let unfiltered = self
             .store
             .secrets(&self.current_secrets_key())
             .map_or_else(Vec::new, <[SecretEntry]>::to_vec);
+        let scope = FilterScope::Secrets {
+            mount: self.secrets_engine.clone(),
+            path: self.secrets_path.clone(),
+        };
         SecretsModel {
             engine: self.secrets_engine.as_str().to_owned(),
             path: self.secrets_path.clone(),
-            entries,
+            entries: self.filter_entries(&scope, &unfiltered),
             selected: self.secrets_selected,
         }
     }
@@ -454,11 +950,10 @@ impl<V: VaultApi + 'static> App<V> {
     /// Builds the pure secret data render model.
     pub fn secret_data_model(&self) -> Option<SecretDataModel> {
         let ui = self.secret_data.as_ref()?;
-        let keys = ui
-            .data
-            .data
-            .keys()
-            .map(|key| KeyRow { label: key.clone() })
+        let keys = self
+            .filtered_data_keys()
+            .into_iter()
+            .map(|key| KeyRow { label: key })
             .collect();
         Some(SecretDataModel {
             secret_name: ui.key.as_str().to_owned(),
@@ -495,11 +990,12 @@ impl<V: VaultApi + 'static> App<V> {
             return;
         };
         draw_header(frame, *header_area, &self.header_model(), &self.theme);
-        draw_commands(
+        draw_commands_with_input(
             frame,
             *commands_area,
             self.commands_page(),
             self.permission(),
+            self.command_bar_input(),
             &self.theme,
         );
         match self.state {
@@ -533,6 +1029,15 @@ impl<V: VaultApi + 'static> App<V> {
                 error: prompt.error.clone(),
             };
             draw_prompt(frame, *body_area, &model, &self.theme);
+        }
+        match &self.overlay {
+            Some(Overlay::Command(state)) => {
+                draw_palette(frame, *body_area, &Self::palette_model(state), &self.theme);
+            }
+            Some(Overlay::Contexts(state)) => {
+                draw_contexts(frame, *body_area, &self.contexts_model(state), &self.theme);
+            }
+            None => {}
         }
     }
 
@@ -604,7 +1109,7 @@ impl<V: VaultApi + 'static> App<V> {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.engines_selected =
-                    next_index(self.engines_selected, self.store.engines().len());
+                    next_index(self.engines_selected, self.engines_model().engines.len());
                 false
             }
             KeyCode::Enter => {
@@ -774,7 +1279,8 @@ impl<V: VaultApi + 'static> App<V> {
     }
 
     fn open_selected_engine(&mut self) {
-        let Some(entry) = self.store.engines().get(self.engines_selected) else {
+        let engines = self.engines_model().engines;
+        let Some(entry) = engines.get(self.engines_selected) else {
             return;
         };
         self.secrets_engine = entry.name.clone();
@@ -853,7 +1359,7 @@ impl<V: VaultApi + 'static> App<V> {
 
     fn selected_data_key(&self) -> Option<String> {
         let ui = self.secret_data.as_ref()?;
-        ui.data.data.keys().nth(ui.selected).cloned()
+        self.filtered_data_keys().get(ui.selected).cloned()
     }
 
     fn selected_data_value(&self) -> Option<String> {
@@ -909,6 +1415,9 @@ impl<V: VaultApi + 'static> App<V> {
     }
 
     fn move_secret_key_up(&mut self) {
+        if self.filtered_data_keys().is_empty() {
+            return;
+        }
         let Some(ui) = self.secret_data.as_mut() else {
             return;
         };
@@ -917,9 +1426,10 @@ impl<V: VaultApi + 'static> App<V> {
     }
 
     fn move_secret_key_down(&mut self) {
-        let Some(len) = self.secret_data.as_ref().map(|ui| ui.data.data.len()) else {
+        let len = self.filtered_data_keys().len();
+        if len == 0 {
             return;
-        };
+        }
         if let Some(ui) = self.secret_data.as_mut() {
             ui.selected = next_index(ui.selected, len);
         }
@@ -1655,6 +2165,142 @@ mod tests {
 
     fn ctrl(ch: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn command_palette_opens_when_colon_pressed() {
+        // Given: an app in the engines view.
+        let (mut app, _rx, _vault) = test_app();
+
+        // When: `:` is pressed.
+        app.handle_input(key(KeyCode::Char(':')));
+
+        // Then: the command palette overlay opens.
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::Command(PaletteState {
+                input: String::new(),
+                selected: 0
+            }))
+        );
+    }
+
+    #[test]
+    fn command_palette_ctx_opens_contexts_overlay_on_enter() {
+        // Given: an app with the command palette open.
+        let (mut app, _rx, _vault) = test_app();
+        app.handle_input(key(KeyCode::Char(':')));
+
+        // When: `ctx` is typed and Enter is pressed.
+        app.handle_input(key(KeyCode::Char('c')));
+        app.handle_input(key(KeyCode::Char('t')));
+        app.handle_input(key(KeyCode::Char('x')));
+        app.handle_input(key(KeyCode::Enter));
+
+        // Then: the contexts overlay opens.
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::Contexts(ContextsState {
+                filter: String::new(),
+                selected: 0
+            }))
+        );
+    }
+
+    #[test]
+    fn contexts_enter_sets_pending_connect_for_selected_profile() {
+        // Given: one available profile and the contexts overlay open.
+        let (app, _rx, _vault) = test_app();
+        let mut app = app.with_profiles(Profiles {
+            profiles: vec![Profile {
+                name: "dev".to_owned(),
+                addr: "http://127.0.0.1:8200".to_owned(),
+                token_source: crate::profiles::TokenSource::File(std::path::PathBuf::from(
+                    "~/.vault-token",
+                )),
+            }],
+            current: Some("dev".to_owned()),
+        });
+        app.open_contexts();
+
+        // When: Enter is pressed on the selected profile.
+        app.handle_input(key(KeyCode::Enter));
+
+        // Then: a reconnect request is queued and the overlay closes.
+        let request = app.take_pending_connect();
+        assert_eq!(
+            request
+                .as_ref()
+                .and_then(|value| value.profile_name.as_deref()),
+            Some("dev")
+        );
+        assert_eq!(app.overlay, None);
+    }
+
+    #[test]
+    fn slash_filter_on_engines_filters_and_resets_selection() {
+        // Given: engines loaded and a non-zero engines selection.
+        let (mut app, _rx, _vault) = test_app();
+        let generation = app.store.bump_generation();
+        app.apply(Msg::EnginesLoaded {
+            generation,
+            entries: vec![SecretEntry::leaf("secret"), SecretEntry::leaf("prod")],
+        });
+        app.engines_selected = 1;
+
+        // When: `/` opens filtering and `sec` is typed.
+        app.handle_input(key(KeyCode::Char('/')));
+        app.handle_input(key(KeyCode::Char('s')));
+        app.handle_input(key(KeyCode::Char('e')));
+        app.handle_input(key(KeyCode::Char('c')));
+
+        // Then: only matching engines remain and selection resets to zero.
+        assert_eq!(app.engines_selected, 0);
+        assert_eq!(
+            app.engines_model().engines,
+            vec![SecretEntry::leaf("secret")]
+        );
+    }
+
+    #[test]
+    fn escape_clears_active_filter() {
+        // Given: an active engines filter.
+        let (mut app, _rx, _vault) = test_app();
+        app.handle_input(key(KeyCode::Char('/')));
+        app.handle_input(key(KeyCode::Char('a')));
+        assert!(app.filter.is_some());
+
+        // When: Esc is pressed while editing the filter.
+        app.handle_input(key(KeyCode::Esc));
+
+        // Then: the filter is cleared.
+        assert_eq!(app.filter, None);
+    }
+
+    #[test]
+    fn command_bar_input_reports_filter_match_counts() {
+        // Given: engines and an active `/` filter query.
+        let (mut app, _rx, _vault) = test_app();
+        let generation = app.store.bump_generation();
+        app.apply(Msg::EnginesLoaded {
+            generation,
+            entries: vec![SecretEntry::leaf("secret"), SecretEntry::leaf("prod")],
+        });
+        app.handle_input(key(KeyCode::Char('/')));
+        app.handle_input(key(KeyCode::Char('s')));
+
+        // When: command bar input is queried.
+        let input = app.command_bar_input();
+
+        // Then: it reports filter text and matched/total counts.
+        assert_eq!(
+            input,
+            Some(CommandBarInput::Filter {
+                query: "s",
+                matched: 1,
+                total: 2,
+            })
+        );
     }
 
     #[test]

@@ -1,0 +1,17 @@
+---
+source: src/ui/palette.rs
+expression: output
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+             ┌Commands───────────────────────────────────────────┐              
+             │:█                                                 │              
+             │enter run │ esc cancel                             │              
+             │:ctx  switch connection context                    │              
+             │:filter  filter the focused list                   │              
+             │:quit  exit tresor                                 │              
+             └───────────────────────────────────────────────────┘

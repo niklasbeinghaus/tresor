@@ -1,0 +1,16 @@
+---
+source: src/ui/contexts.rs
+expression: output
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+             ┌Contexts · /pr_────────────────────────────────────┐              
+             │/pr█                                               │              
+             │enter switch │ esc cancel                          │              
+             │  prod  https://vault.example:8200                 │              
+             └───────────────────────────────────────────────────┘

@@ -1,0 +1,17 @@
+---
+source: src/ui/contexts.rs
+expression: output
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+             ┌Contexts (type to filter)──────────────────────────┐              
+             │/ filter                                           │              
+             │enter switch │ esc cancel                          │              
+             │● dev  http://127.0.0.1:8200                       │              
+             │  prod  https://vault.example:8200                 │              
+             └───────────────────────────────────────────────────┘

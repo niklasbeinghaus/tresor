@@ -180,6 +180,13 @@ impl Store {
         self.generation
     }
 
+    /// Clears cached engines and listings without resetting the generation, so
+    /// results still in flight from a previous connection are dropped as stale.
+    pub fn clear_cached_data_preserving_generation(&mut self) {
+        self.engines.clear();
+        self.secrets.clear();
+    }
+
     /// Returns the cached secret engines.
     #[must_use]
     pub fn engines(&self) -> &[SecretEntry] {
@@ -310,6 +317,32 @@ mod tests {
             store.secrets(&sibling),
             Some([SecretEntry::leaf("two")].as_slice())
         );
+    }
+
+    #[test]
+    fn clear_cached_data_preserving_generation_keeps_generation_and_drops_stale() {
+        let mut store = Store::new();
+        let generation = store.bump_generation();
+        load_secrets(
+            &mut store,
+            generation,
+            key("team/"),
+            vec![SecretEntry::leaf("one")],
+        );
+        assert!(store.apply(Msg::EnginesLoaded {
+            generation,
+            entries: vec![SecretEntry::dir("secret/")],
+        }));
+
+        store.clear_cached_data_preserving_generation();
+
+        assert_eq!(store.engines(), []);
+        assert_eq!(store.secrets(&key("team/")), None);
+        assert_eq!(store.generation(), generation);
+        assert!(!store.apply(Msg::EnginesLoaded {
+            generation: generation - 1,
+            entries: Vec::new(),
+        }));
     }
 
     #[test]

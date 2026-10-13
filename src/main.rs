@@ -16,12 +16,17 @@ use futures::StreamExt as _;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use secrecy::ExposeSecret as _;
+use tokio::sync::mpsc;
 use tokio::time;
 use tresor::app::{App, AppState};
 use tresor::config::Config;
 use tresor::path::SecretPath;
+use tresor::profiles::{self, ConnectRequest, Profiles};
+use tresor::store::Msg;
 use tresor::theme::Theme;
 use tresor::vault::{VaultApi as _, VaultClient};
+
+type ReconnectResult = Result<(Config, Arc<VaultClient>, Option<String>), String>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,11 +42,8 @@ async fn main() -> Result<()> {
 
     match std::env::args().nth(1).as_deref() {
         Some("--check") => {
-            return run_check(Config::from_env().context(
-                "no configuration: set BAO_ADDR (or VAULT_ADDR) and provide a token \
-                 (BAO_TOKEN/VAULT_TOKEN env or the ~/.vault-token written by `bao login`)",
-            )?)
-            .await;
+            let check_config = check_config_from_env_or_profile().await?;
+            return run_check(check_config).await;
         }
         Some("--version" | "-V") => {
             print_version();
@@ -54,35 +56,11 @@ async fn main() -> Result<()> {
         _ => {}
     }
 
-    let env_config = Config::from_env();
-    let startup_config = env_config
-        .clone()
-        .unwrap_or_else(|| Config::new("http://127.0.0.1:8200", ""));
-    let vault = Arc::new(
-        VaultClient::connect(&startup_config.addr, startup_config.token.expose_secret())
-            .context("failed to initialize Vault client")?,
-    );
-    let theme = Theme::load_sofka_or_default();
-    let (mut app, mut msg_rx) = match env_config {
-        Some(config) => App::new_with_theme(config, vault, theme),
-        None => App::config_input_with_theme(vault, theme),
-    };
-    if !matches!(app.state, AppState::ConfigInput) {
-        app.spawn_initial_loads();
-    }
+    let (mut app, mut msg_rx) = build_app().await?;
+    let (connect_tx, mut connect_rx) = mpsc::unbounded_channel::<ReconnectResult>();
 
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
-        default_hook(info);
-    }));
-
-    enable_raw_mode().context("failed to enable raw mode")?;
-    let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture)
-        .context("failed to enter alternate screen")?;
-    let backend = CrosstermBackend::new(out);
-    let mut terminal = Terminal::new(backend).context("failed to create terminal")?;
+    install_panic_hook();
+    let mut terminal = init_terminal()?;
     let mut events = EventStream::new();
     let mut tick = time::interval(Duration::from_secs(1));
     let mut dirty = true;
@@ -110,6 +88,9 @@ async fn main() -> Result<()> {
                                 }
                             } else {
                                 quit = app.handle_input(key);
+                                if let Some(request) = app.take_pending_connect() {
+                                    spawn_connect_request(request, connect_tx.clone());
+                                }
                             }
                             dirty = true;
                         }
@@ -121,6 +102,12 @@ async fn main() -> Result<()> {
             maybe_msg = msg_rx.recv() => {
                 if let Some(msg) = maybe_msg {
                     app.apply(msg);
+                    dirty = true;
+                }
+            }
+            maybe_connect = connect_rx.recv() => {
+                if let Some(result) = maybe_connect {
+                    apply_connect_result(&mut app, result);
                     dirty = true;
                 }
             }
@@ -161,9 +148,103 @@ CONFIGURATION (first match wins):
   BAO_ADDR / VAULT_ADDR              Vault or OpenBao address
   BAO_TOKEN / VAULT_TOKEN            authentication token
   BAO_TOKEN_PATH / VAULT_TOKEN_PATH  CLI token store override
-  ~/.vault-token                     written by `vault login` / `bao login`",
+  ~/.vault-token                     written by `vault login` / `bao login`
+  ~/.config/tresor/config.toml       named connection profiles (`:ctx`); $TRESOR_CONFIG overrides",
         env!("CARGO_PKG_VERSION")
     );
+}
+
+async fn build_app() -> Result<(App<VaultClient>, mpsc::UnboundedReceiver<Msg>)> {
+    let profiles = profiles::load_profiles().unwrap_or_default();
+    let env_config = Config::from_env();
+    let (startup_choice, connected, profile_name) =
+        resolve_startup_choice(env_config, &profiles).await;
+
+    let startup_config = startup_choice
+        .clone()
+        .unwrap_or_else(|| Config::new("http://127.0.0.1:8200", ""));
+    let vault = Arc::new(
+        VaultClient::connect(&startup_config.addr, startup_config.token.expose_secret())
+            .context("failed to initialize Vault client")?,
+    );
+    let theme = Theme::load_sofka_or_default();
+    let (mut app, msg_rx) = match startup_choice {
+        Some(config) if connected => App::new_with_theme(config, vault, theme),
+        _ => App::config_input_with_theme(vault, theme),
+    };
+    app = app.with_profiles(profiles);
+    if connected {
+        app.set_current_profile(profile_name);
+    }
+    if !matches!(app.state, AppState::ConfigInput) {
+        app.spawn_initial_loads();
+    }
+    Ok((app, msg_rx))
+}
+
+async fn check_config_from_env_or_profile() -> Result<Config> {
+    if let Some(config) = Config::from_env() {
+        return Ok(config);
+    }
+    let profiles = profiles::load_profiles().unwrap_or_default();
+    let Some(profile) = profiles.current() else {
+        return Err(anyhow::anyhow!(
+            "no configuration: set BAO_ADDR (or VAULT_ADDR) and provide a token \
+             (BAO_TOKEN/VAULT_TOKEN env or the ~/.vault-token written by `bao login`)"
+        ));
+    };
+    profile
+        .to_request()
+        .resolve_config()
+        .await
+        .context("failed to resolve current profile")
+}
+
+async fn resolve_startup_choice(
+    env_config: Option<Config>,
+    profiles: &Profiles,
+) -> (Option<Config>, bool, Option<String>) {
+    if let Some(config) = env_config {
+        return (Some(config), true, None);
+    }
+    let Some(profile) = profiles.current() else {
+        return (None, false, None);
+    };
+    match profile.to_request().resolve_config().await {
+        Ok(config) => (Some(config), true, Some(profile.name.clone())),
+        Err(err) => {
+            tracing::warn!(
+                %err,
+                profile = %profile.name,
+                "failed to resolve current profile, falling back to config modal"
+            );
+            (None, false, None)
+        }
+    }
+}
+
+fn spawn_connect_request(request: ConnectRequest, tx: mpsc::UnboundedSender<ReconnectResult>) {
+    tokio::spawn(async move {
+        let name = request.profile_name.clone();
+        let result = match request.resolve_config().await {
+            Ok(config) => match VaultClient::connect(&config.addr, config.token.expose_secret()) {
+                Ok(vault) => Ok((config, Arc::new(vault), name)),
+                Err(err) => Err(err.message()),
+            },
+            Err(err) => Err(err.to_string()),
+        };
+        let _send_result = tx.send(result);
+    });
+}
+
+fn apply_connect_result(app: &mut App<VaultClient>, result: ReconnectResult) {
+    match result {
+        Ok((config, vault, name)) => {
+            app.connect_config(config, vault);
+            app.set_current_profile(name);
+        }
+        Err(message) => app.report_error(message),
+    }
 }
 
 fn restore_terminal() {
@@ -174,6 +255,23 @@ fn restore_terminal() {
     if let Err(err) = execute!(out, LeaveAlternateScreen, DisableMouseCapture) {
         tracing::warn!(%err, "failed to restore terminal screen");
     }
+}
+
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        default_hook(info);
+    }));
+}
+
+fn init_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
+    enable_raw_mode().context("failed to enable raw mode")?;
+    let mut out = stdout();
+    execute!(out, EnterAlternateScreen, EnableMouseCapture)
+        .context("failed to enter alternate screen")?;
+    let backend = CrosstermBackend::new(out);
+    Terminal::new(backend).context("failed to create terminal")
 }
 
 /// Prints a plain-text connectivity/API diagnostic (health, token, engines,
