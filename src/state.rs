@@ -17,6 +17,8 @@ pub enum Mode {
     Secrets,
     /// Secret key/value detail view.
     SecretData,
+    /// Secret version history and version preview view.
+    Versions,
 }
 
 impl Mode {
@@ -28,6 +30,7 @@ impl Mode {
             Self::Engines => pages::ENGINES,
             Self::Secrets => pages::SECRETS,
             Self::SecretData => pages::SECRET_DATA,
+            Self::Versions => pages::VERSIONS,
         }
     }
 }
@@ -112,6 +115,7 @@ mod tests {
         assert_eq!(Mode::Engines.page_id(), pages::ENGINES);
         assert_eq!(Mode::Secrets.page_id(), pages::SECRETS);
         assert_eq!(Mode::SecretData.page_id(), pages::SECRET_DATA);
+        assert_eq!(Mode::Versions.page_id(), pages::VERSIONS);
     }
 
     #[test]

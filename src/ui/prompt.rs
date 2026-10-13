@@ -18,6 +18,8 @@ pub enum PromptKind {
     NewKey,
     /// Confirmation before deleting a secret (`input` holds its name).
     DeleteSecret,
+    /// Confirmation before permanently destroying one secret version.
+    DestroyVersion,
 }
 
 impl PromptKind {
@@ -28,6 +30,7 @@ impl PromptKind {
             Self::NewSecret => "New Secret",
             Self::NewKey => "New Key",
             Self::DeleteSecret => "Delete Secret",
+            Self::DestroyVersion => "Destroy Version",
         }
     }
 
@@ -38,7 +41,14 @@ impl PromptKind {
             Self::NewSecret => "Secret name",
             Self::NewKey => "Key name",
             Self::DeleteSecret => "Confirm",
+            Self::DestroyVersion => "Type version",
         }
+    }
+
+    /// Returns whether this prompt accepts typed input.
+    #[must_use]
+    pub const fn accepts_input(self) -> bool {
+        !matches!(self, Self::DeleteSecret)
     }
 }
 
@@ -51,6 +61,8 @@ pub struct PromptModel {
     pub input: String,
     /// Optional error shown under the field (e.g. permission denied).
     pub error: Option<String>,
+    /// Optional exact confirmation text expected from the user.
+    pub expected: Option<String>,
 }
 
 /// Draws the centered input prompt over `area`.
@@ -83,6 +95,18 @@ pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme
             format!("delete secret '{}'?", model.input),
             Style::default().fg(theme.status_warn),
         ))
+    } else if model.kind == PromptKind::DestroyVersion {
+        let expected = model.expected.as_deref().unwrap_or_default();
+        Line::from(vec![
+            Span::styled(
+                format!("permanently destroy version {expected}? "),
+                Style::default().fg(theme.status_error),
+            ),
+            Span::styled(
+                model.input.as_str(),
+                Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
+            ),
+        ])
     } else {
         Line::from(vec![
             Span::styled(
@@ -99,10 +123,18 @@ pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme
 
     let message = model.error.as_ref().map_or_else(
         || {
-            Line::from(Span::styled(
-                "enter confirm │ esc cancel",
-                Style::default().fg(theme.masked_fg),
-            ))
+            if model.kind == PromptKind::DestroyVersion {
+                let expected = model.expected.as_deref().unwrap_or_default();
+                Line::from(Span::styled(
+                    format!("type {expected} to confirm · esc cancel"),
+                    Style::default().fg(theme.masked_fg),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    "enter confirm │ esc cancel",
+                    Style::default().fg(theme.masked_fg),
+                ))
+            }
         },
         |error| {
             Line::from(Span::styled(
@@ -128,13 +160,19 @@ mod tests {
 
     use super::*;
 
-    fn render(kind: PromptKind, input: &str, error: Option<&str>) -> String {
+    fn render(
+        kind: PromptKind,
+        input: &str,
+        error: Option<&str>,
+        expected: Option<&str>,
+    ) -> String {
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("TestBackend");
         let model = PromptModel {
             kind,
             input: input.to_owned(),
             error: error.map(str::to_owned),
+            expected: expected.map(str::to_owned),
         };
         terminal
             .draw(|frame| {
@@ -160,7 +198,7 @@ mod tests {
     fn prompt_new_secret_shows_title_label_and_hint() {
         // Given: a new-secret prompt with a typed name.
         // When: it is rendered.
-        let output = render(PromptKind::NewSecret, "team/creds", None);
+        let output = render(PromptKind::NewSecret, "team/creds", None, None);
         // Then: the title, label, input and confirm hint are visible.
         assert_snapshot!("prompt_new_secret", output);
         assert!(output.contains("New Secret"));
@@ -173,7 +211,7 @@ mod tests {
     fn prompt_shows_error_when_present() {
         // Given: a prompt carrying a permission error.
         // When: it is rendered.
-        let output = render(PromptKind::NewKey, "token", Some("permission denied"));
+        let output = render(PromptKind::NewKey, "token", Some("permission denied"), None);
         // Then: the error line replaces the hint.
         assert_snapshot!("prompt_error", output);
         assert!(output.contains("permission denied"));
@@ -183,10 +221,19 @@ mod tests {
     fn prompt_delete_shows_confirmation_question() {
         // Given: a delete confirmation for a named secret.
         // When: it is rendered.
-        let output = render(PromptKind::DeleteSecret, "team/creds", None);
+        let output = render(PromptKind::DeleteSecret, "team/creds", None, None);
         // Then: the question names the secret and the confirm hint is shown.
         assert_snapshot!("prompt_delete_confirm", output);
         assert!(output.contains("delete secret 'team/creds'?"));
         assert!(output.contains("enter confirm"));
+    }
+
+    #[test]
+    fn prompt_destroy_version_requires_exact_version() {
+        let output = render(PromptKind::DestroyVersion, "", None, Some("12"));
+
+        assert_snapshot!(output);
+        assert!(output.contains("permanently destroy version 12?"));
+        assert!(output.contains("type 12 to confirm"));
     }
 }
