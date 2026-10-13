@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use crate::clipboard::{TextClipboard, default_clipboard};
 use crate::config::Config;
 use crate::constants::{NA_VALUE, STATUS_EXPIRY_SECS, keys};
-use crate::model::{HealthInfo, KvData, SecretEntry, TokenInfo};
+use crate::model::{HealthInfo, KvData, SecretEntry, TokenInfo, VersionMeta};
 use crate::path::SecretPath;
 use crate::state::Mode;
 use crate::store::{CacheKey, Msg, Store};
@@ -26,6 +26,7 @@ use crate::ui::modal::{ModalField, ModalModel, draw_modal};
 use crate::ui::prompt::{PromptKind, PromptModel, draw_prompt};
 use crate::ui::secret_data::{DataMode, KeyRow, SecretDataModel, draw_secret_data};
 use crate::ui::secrets::{SecretsModel, draw_secrets, sort_entries};
+use crate::ui::versions::{VersionRow, VersionsModel, draw_versions};
 use crate::vault::{VaultApi, VaultError};
 
 const TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -43,6 +44,8 @@ pub struct PromptState {
     pub input: String,
     /// Optional error (e.g. empty name, permission denied).
     pub error: Option<String>,
+    /// Optional exact text expected for destructive confirmations.
+    pub expected: Option<String>,
 }
 
 /// Header information loaded from Vault after connection.
@@ -93,7 +96,39 @@ pub struct SecretDataUi {
     pub original_data: BTreeMap<String, SecretString>,
 }
 
+/// Version-preview state owned by the app.
+#[derive(Debug, Clone)]
+pub struct VersionPreviewUi {
+    /// Loaded version payload.
+    pub data: KvData,
+    /// Version number for this preview payload.
+    pub version: u64,
+    /// Selected preview key index.
+    pub selected: usize,
+    /// Preview display mode (`ListOnly`/`Preview` only).
+    pub mode: DataMode,
+}
+
+/// Secret version-history state owned by the app.
+#[derive(Debug, Clone)]
+pub struct VersionsUi {
+    /// Full leaf path inside the mounted engine.
+    pub key: SecretPath,
+    /// Current version number from metadata.
+    pub current_version: u64,
+    /// Loaded versions sorted newest-first.
+    pub versions: Vec<VersionMeta>,
+    /// Selected version row index.
+    pub selected: usize,
+    /// Optional loaded preview for the selected version.
+    pub preview: Option<VersionPreviewUi>,
+}
+
 /// Running TUI application with injectable Vault API.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "capability bits are modeled explicitly for command gating and prompt checks"
+)]
 pub struct App<V: VaultApi> {
     /// Current route state.
     pub state: AppState,
@@ -122,10 +157,20 @@ pub struct App<V: VaultApi> {
     pub secrets_engine: SecretPath,
     /// Current secret data UI state.
     pub secret_data: Option<SecretDataUi>,
-    /// Token may create/update secrets at the current context (permission gate).
-    pub can_write: bool,
-    /// Token may delete secrets at the current context (permission gate).
-    pub can_delete: bool,
+    /// Current version-history UI state.
+    pub versions: Option<VersionsUi>,
+    /// Token may create secrets at the current context (permission gate).
+    pub can_create: bool,
+    /// Token may update secrets at the current context (permission gate).
+    pub can_update: bool,
+    /// Token may soft-delete secret versions at the current context.
+    pub can_soft_delete: bool,
+    /// Token may metadata-delete secret paths at the current context.
+    pub can_metadata_delete: bool,
+    /// Token may destroy secret versions at the current context.
+    pub can_destroy: bool,
+    /// Token may undelete secret versions at the current context.
+    pub can_undelete: bool,
     /// Active input prompt, if any.
     pub prompt: Option<PromptState>,
     modal_addr: String,
@@ -217,8 +262,13 @@ impl<V: VaultApi + 'static> App<V> {
                 secrets_path: SecretPath::root(),
                 secrets_engine: SecretPath::root(),
                 secret_data: None,
-                can_write: false,
-                can_delete: false,
+                versions: None,
+                can_create: false,
+                can_update: false,
+                can_soft_delete: false,
+                can_metadata_delete: false,
+                can_destroy: false,
+                can_undelete: false,
                 prompt: None,
                 modal_addr: String::new(),
                 modal_token: String::new(),
@@ -300,12 +350,21 @@ impl<V: VaultApi + 'static> App<V> {
             AppState::Main(Mode::Engines) => self.handle_engines_input(key),
             AppState::Main(Mode::Secrets) => self.handle_secrets_input(key),
             AppState::Main(Mode::SecretData) => self.handle_secret_data_input(key),
+            AppState::Main(Mode::Versions) => self.handle_versions_input(key),
         }
     }
 
     /// Folds a background message into app/store state.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single message fold entrypoint keeps app state transitions centralized"
+    )]
     pub fn apply(&mut self, msg: Msg) {
         self.pending = false;
+        let is_current = msg.generation() == self.store.generation();
+        if !is_current {
+            return;
+        }
         match &msg {
             Msg::HealthLoaded { info, .. } => self.apply_health(info),
             Msg::TokenLoaded { info, .. } => self.apply_token(info),
@@ -319,6 +378,8 @@ impl<V: VaultApi + 'static> App<V> {
                     StatusKind::Error,
                     format!("path '{}' does not exist", key.path.as_str()),
                 );
+                self.versions = None;
+                self.secret_data = None;
                 self.secrets_path = key.path.parent();
                 self.state = AppState::Main(Mode::Secrets);
             }
@@ -331,13 +392,81 @@ impl<V: VaultApi + 'static> App<V> {
                 );
                 self.spawn_load_secrets(self.current_secrets_key());
             }
-            Msg::SecretDeleted { key, .. } => {
+            Msg::SecretMetadataDeleted { key, .. } => {
                 let name = key.path.child_name();
                 self.set_status(
                     StatusKind::Success,
                     format!("secret '{}' deleted", name.as_str()),
                 );
                 self.spawn_load_secrets(self.current_secrets_key());
+            }
+            Msg::VersionsLoaded { key, history, .. } => {
+                if let Some(secret) = &self.secret_data {
+                    if secret.key == key.path {
+                        self.versions = Some(VersionsUi {
+                            key: key.path.clone(),
+                            current_version: history.current_version,
+                            versions: history.versions.clone(),
+                            selected: 0,
+                            preview: None,
+                        });
+                        self.state = AppState::Main(Mode::Versions);
+                    }
+                }
+            }
+            Msg::SecretVersionLoaded {
+                key, version, data, ..
+            } => {
+                if let Some(versions) = self.versions.as_mut() {
+                    if versions.key == key.path {
+                        let selected_version = versions
+                            .versions
+                            .get(
+                                versions
+                                    .selected
+                                    .min(versions.versions.len().saturating_sub(1)),
+                            )
+                            .map(|item| item.version);
+                        if selected_version == Some(*version) {
+                            versions.preview = Some(VersionPreviewUi {
+                                data: data.clone(),
+                                version: *version,
+                                selected: 0,
+                                mode: DataMode::ListOnly,
+                            });
+                            let text = format!("loaded version {version}");
+                            self.set_status(StatusKind::Info, text);
+                        }
+                    }
+                }
+            }
+            Msg::SecretVersionDeleted { key, version, .. } => {
+                self.set_status(StatusKind::Success, format!("version {version} deleted"));
+                self.spawn_load_versions(key.clone());
+            }
+            Msg::SecretVersionUndeleted { key, version, .. } => {
+                self.set_status(StatusKind::Success, format!("version {version} undeleted"));
+                self.spawn_load_versions(key.clone());
+            }
+            Msg::SecretVersionDestroyed { key, version, .. } => {
+                self.set_status(StatusKind::Success, format!("version {version} destroyed"));
+                self.spawn_load_versions(key.clone());
+            }
+            Msg::SecretVersionRestored {
+                key,
+                source_version,
+                ..
+            } => {
+                self.set_status(
+                    StatusKind::Success,
+                    format!(
+                        "version {source_version} restored as latest; values were written as strings"
+                    ),
+                );
+                // Only the version history is reloaded here: a concurrent
+                // secrets-listing load would bump the generation again and make
+                // this reload stale, so the new version would never appear.
+                self.spawn_load_versions(key.clone());
             }
             Msg::Capabilities { .. }
             | Msg::EnginesLoaded { .. }
@@ -348,10 +477,21 @@ impl<V: VaultApi + 'static> App<V> {
         let mut cache_msg = msg;
         let capability_update = match &cache_msg {
             Msg::Capabilities {
-                writable,
-                deletable,
+                create,
+                update,
+                soft_delete,
+                metadata_delete,
+                destroy,
+                undelete,
                 ..
-            } => Some((*writable, *deletable)),
+            } => Some((
+                *create,
+                *update,
+                *soft_delete,
+                *metadata_delete,
+                *destroy,
+                *undelete,
+            )),
             _ => None,
         };
         if let Msg::SecretsLoaded { entries, .. } = &mut cache_msg {
@@ -359,9 +499,15 @@ impl<V: VaultApi + 'static> App<V> {
         }
         let accepted = self.store.apply(cache_msg);
         if accepted {
-            if let Some((writable, deletable)) = capability_update {
-                self.can_write = writable;
-                self.can_delete = deletable;
+            if let Some((create, update, soft_delete, metadata_delete, destroy, undelete)) =
+                capability_update
+            {
+                self.can_create = create;
+                self.can_update = update;
+                self.can_soft_delete = soft_delete;
+                self.can_metadata_delete = metadata_delete;
+                self.can_destroy = destroy;
+                self.can_undelete = undelete;
             }
         }
     }
@@ -414,8 +560,12 @@ impl<V: VaultApi + 'static> App<V> {
     #[must_use]
     pub const fn permission(&self) -> Permission {
         Permission {
-            write: self.can_write,
-            delete: self.can_delete,
+            create: self.can_create,
+            update: self.can_update,
+            soft_delete: self.can_soft_delete,
+            metadata_delete: self.can_metadata_delete,
+            destroy: self.can_destroy,
+            undelete: self.can_undelete,
         }
     }
 
@@ -426,6 +576,7 @@ impl<V: VaultApi + 'static> App<V> {
             AppState::Main(Mode::Engines) => Page::Engines,
             AppState::Main(Mode::Secrets) => Page::Secrets,
             AppState::Main(Mode::SecretData) => Page::SecretData,
+            AppState::Main(Mode::Versions) => Page::Versions,
         }
     }
 
@@ -468,6 +619,48 @@ impl<V: VaultApi + 'static> App<V> {
             keys,
             selected: ui.selected,
             mode: ui.mode.clone(),
+            read_only: false,
+        })
+    }
+
+    /// Builds the pure versions render model.
+    pub fn versions_model(&self) -> Option<VersionsModel> {
+        let versions = self.versions.as_ref()?;
+        let rows = versions
+            .versions
+            .iter()
+            .map(|item| VersionRow {
+                version: item.version,
+                created_time: item.created_time.clone(),
+                deletion_time: item.deletion_time.clone(),
+                destroyed: item.destroyed,
+                is_current: item.is_current,
+            })
+            .collect();
+        let preview = versions.preview.as_ref().map(|preview_ui| {
+            let keys = preview_ui
+                .data
+                .data
+                .keys()
+                .map(|key| KeyRow { label: key.clone() })
+                .collect();
+            SecretDataModel {
+                secret_name: versions.key.as_str().to_owned(),
+                engine: self.secrets_engine.as_str().to_owned(),
+                version: preview_ui.data.metadata.version,
+                created_time: preview_ui.data.metadata.created_time.clone(),
+                keys,
+                selected: preview_ui.selected,
+                mode: preview_ui.mode.clone(),
+                read_only: true,
+            }
+        });
+        Some(VersionsModel {
+            secret_name: versions.key.as_str().to_owned(),
+            engine: self.secrets_engine.as_str().to_owned(),
+            rows,
+            selected: versions.selected,
+            preview,
         })
     }
 
@@ -525,12 +718,18 @@ impl<V: VaultApi + 'static> App<V> {
                     draw_secret_data(frame, *body_area, &model, &self.theme);
                 }
             }
+            AppState::Main(Mode::Versions) => {
+                if let Some(model) = self.versions_model() {
+                    draw_versions(frame, *body_area, &model, &self.theme);
+                }
+            }
         }
         if let Some(prompt) = &self.prompt {
             let model = PromptModel {
                 kind: prompt.kind,
                 input: prompt.input.clone(),
                 error: prompt.error.clone(),
+                expected: prompt.expected.clone(),
             };
             draw_prompt(frame, *body_area, &model, &self.theme);
         }
@@ -660,8 +859,8 @@ impl<V: VaultApi + 'static> App<V> {
                 self.open_new_secret_prompt();
                 false
             }
-            KeyCode::Char('d') => {
-                self.open_delete_secret_prompt();
+            KeyCode::Char(keys::METADATA_DELETE) => {
+                self.open_delete_secret_metadata_prompt();
                 false
             }
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -701,7 +900,7 @@ impl<V: VaultApi + 'static> App<V> {
         }
         match key.code {
             KeyCode::Esc => {
-                self.state = AppState::Main(Mode::Secrets);
+                self.back_from_secret_data();
                 false
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -723,6 +922,14 @@ impl<V: VaultApi + 'static> App<V> {
                 }
                 keys::EDIT => {
                     self.edit_selected_value();
+                    false
+                }
+                keys::VERSIONS => {
+                    self.open_versions_pane();
+                    false
+                }
+                'd' => {
+                    self.open_soft_delete_latest_prompt();
                     false
                 }
                 'a' => {
@@ -773,18 +980,88 @@ impl<V: VaultApi + 'static> App<V> {
         }
     }
 
+    fn handle_versions_input(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.back_from_versions();
+                false
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(versions) = self.versions.as_mut() {
+                    versions.selected = versions.selected.saturating_sub(1);
+                    versions.preview = None;
+                }
+                false
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(versions) = self.versions.as_mut() {
+                    versions.selected = next_index(versions.selected, versions.versions.len());
+                    versions.preview = None;
+                }
+                false
+            }
+            KeyCode::Enter => {
+                self.load_selected_version_preview();
+                false
+            }
+            KeyCode::Tab => {
+                self.move_version_preview_key_down();
+                false
+            }
+            KeyCode::Char(keys::REVEAL) => {
+                self.reveal_selected_version_preview_value();
+                false
+            }
+            KeyCode::Char(keys::COPY) => {
+                self.copy_selected_version_preview_value();
+                false
+            }
+            KeyCode::Char(keys::RESTORE) => {
+                self.restore_selected_version();
+                false
+            }
+            KeyCode::Char(keys::UNDELETE) => {
+                self.undelete_selected_version();
+                false
+            }
+            KeyCode::Char(keys::DESTROY) => {
+                self.open_destroy_version_prompt();
+                false
+            }
+            KeyCode::BackTab
+            | KeyCode::Backspace
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Delete
+            | KeyCode::Insert
+            | KeyCode::F(_)
+            | KeyCode::Char(_)
+            | KeyCode::Null
+            | KeyCode::CapsLock
+            | KeyCode::ScrollLock
+            | KeyCode::NumLock
+            | KeyCode::PrintScreen
+            | KeyCode::Pause
+            | KeyCode::Menu
+            | KeyCode::KeypadBegin
+            | KeyCode::Media(_)
+            | KeyCode::Modifier(_) => false,
+        }
+    }
+
     fn open_selected_engine(&mut self) {
-        let Some(entry) = self.store.engines().get(self.engines_selected) else {
+        let Some(entry) = self.store.engines().get(self.engines_selected).cloned() else {
             return;
         };
-        self.secrets_engine = entry.name.clone();
+        self.secrets_engine = entry.name;
         self.secrets_path = SecretPath::root();
         self.secrets_selected = 0;
         self.state = AppState::Main(Mode::Secrets);
-        let key = self.current_secrets_key();
-        if self.store.secrets(&key).is_none() {
-            self.spawn_load_secrets(key);
-        }
+        self.load_current_secrets();
     }
 
     fn open_selected_secret_entry(&mut self) {
@@ -796,10 +1073,7 @@ impl<V: VaultApi + 'static> App<V> {
         if entry.is_dir {
             self.secrets_path = next_path;
             self.secrets_selected = 0;
-            let key = self.current_secrets_key();
-            if self.store.secrets(&key).is_none() {
-                self.spawn_load_secrets(key);
-            }
+            self.load_current_secrets();
         } else {
             let key = CacheKey {
                 mount: self.secrets_engine.clone(),
@@ -812,11 +1086,38 @@ impl<V: VaultApi + 'static> App<V> {
 
     fn back_from_secrets(&mut self) {
         if self.secrets_path.is_root() {
+            self.reset_permissions();
             self.state = AppState::Main(Mode::Engines);
         } else {
             self.secrets_path = self.secrets_path.parent();
             self.secrets_selected = 0;
+            self.load_current_secrets();
         }
+    }
+
+    fn back_from_secret_data(&mut self) {
+        self.state = AppState::Main(Mode::Secrets);
+        self.load_current_secrets();
+    }
+
+    /// Loads the current directory listing, or re-probes capabilities when it is
+    /// already cached, so the command hints stay in sync with the context.
+    fn load_current_secrets(&mut self) {
+        let key = self.current_secrets_key();
+        if self.store.secrets(&key).is_none() {
+            self.spawn_load_secrets(key);
+        } else {
+            self.probe_secrets_capabilities();
+        }
+    }
+
+    /// Re-probes capabilities for the current directory without reloading the
+    /// cached listing; permissions stay cleared until the probe returns.
+    fn probe_secrets_capabilities(&mut self) {
+        self.reset_permissions();
+        let mount = self.secrets_engine.clone();
+        let path = self.secrets_path.clone();
+        self.spawn_capabilities(self.store.generation(), &mount, &path, false);
     }
 
     fn hard_refresh_current_path(&mut self) {
@@ -830,6 +1131,7 @@ impl<V: VaultApi + 'static> App<V> {
     }
 
     fn open_secret_data(&mut self, key: &CacheKey, data: KvData) {
+        self.reset_permissions();
         let original_data = data.data.clone();
         self.secret_data = Some(SecretDataUi {
             key: key.path.clone(),
@@ -839,9 +1141,46 @@ impl<V: VaultApi + 'static> App<V> {
             original_data,
         });
         self.state = AppState::Main(Mode::SecretData);
+        self.versions = None;
         let mount = self.secrets_engine.clone();
         let path = key.path.clone();
         self.spawn_capabilities(self.store.generation(), &mount, &path, true);
+    }
+
+    fn open_versions_pane(&mut self) {
+        let Some(secret_key) = self.secret_data.as_ref().map(|secret| secret.key.clone()) else {
+            return;
+        };
+        self.reset_permissions();
+        let key = CacheKey {
+            mount: self.secrets_engine.clone(),
+            path: secret_key,
+        };
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        self.spawn_load_versions_with_generation(key, generation);
+    }
+
+    fn back_from_versions(&mut self) {
+        self.state = AppState::Main(Mode::SecretData);
+        // A restore may have changed the latest version; re-read the open
+        // secret so returning to the data view is not stale.
+        if let Some(secret) = &self.secret_data {
+            let key = CacheKey {
+                mount: self.secrets_engine.clone(),
+                path: secret.key.clone(),
+            };
+            self.spawn_load_secret(key);
+        }
+    }
+
+    const fn reset_permissions(&mut self) {
+        self.can_create = false;
+        self.can_update = false;
+        self.can_soft_delete = false;
+        self.can_metadata_delete = false;
+        self.can_destroy = false;
+        self.can_undelete = false;
     }
 
     fn current_secrets_key(&self) -> CacheKey {
@@ -863,6 +1202,208 @@ impl<V: VaultApi + 'static> App<V> {
             .data
             .get(&key)
             .map(|value| value.expose_secret().to_owned())
+    }
+
+    fn selected_version_row(&self) -> Option<VersionMeta> {
+        let versions = self.versions.as_ref()?;
+        let index = versions
+            .selected
+            .min(versions.versions.len().saturating_sub(1));
+        versions.versions.get(index).cloned()
+    }
+
+    fn selected_version_is_soft_deleted(&self) -> bool {
+        self.selected_version_row()
+            .and_then(|version| version.deletion_time)
+            .is_some()
+    }
+
+    fn selected_version_is_destroyed(&self) -> bool {
+        self.selected_version_row()
+            .is_some_and(|version| version.destroyed)
+    }
+
+    fn selected_version_number(&self) -> Option<u64> {
+        self.selected_version_row().map(|version| version.version)
+    }
+
+    fn load_selected_version_preview(&mut self) {
+        if self.selected_version_is_destroyed() {
+            self.set_status(StatusKind::Error, "destroyed versions cannot be previewed");
+            return;
+        }
+        if self.selected_version_is_soft_deleted() {
+            self.set_status(
+                StatusKind::Info,
+                "soft-deleted versions must be undeleted before preview",
+            );
+            return;
+        }
+        let Some(version) = self.selected_version_number() else {
+            return;
+        };
+        let Some(versions) = &self.versions else {
+            return;
+        };
+        self.spawn_load_version_preview(
+            CacheKey {
+                mount: self.secrets_engine.clone(),
+                path: versions.key.clone(),
+            },
+            version,
+        );
+    }
+
+    fn move_version_preview_key_down(&mut self) {
+        let Some(versions) = self.versions.as_mut() else {
+            return;
+        };
+        let Some(preview) = versions.preview.as_mut() else {
+            return;
+        };
+        preview.selected = next_index(preview.selected, preview.data.data.len());
+    }
+
+    fn selected_version_preview_key(&self) -> Option<String> {
+        let versions = self.versions.as_ref()?;
+        let preview = versions.preview.as_ref()?;
+        preview.data.data.keys().nth(preview.selected).cloned()
+    }
+
+    fn selected_version_preview_value(&self) -> Option<String> {
+        let key = self.selected_version_preview_key()?;
+        let versions = self.versions.as_ref()?;
+        let preview = versions.preview.as_ref()?;
+        preview
+            .data
+            .data
+            .get(&key)
+            .map(|value| value.expose_secret().to_owned())
+    }
+
+    fn reveal_selected_version_preview_value(&mut self) {
+        let Some(key) = self.selected_version_preview_key() else {
+            return;
+        };
+        let Some(value) = self.selected_version_preview_value() else {
+            return;
+        };
+        if let Some(versions) = self.versions.as_mut() {
+            if let Some(preview) = versions.preview.as_mut() {
+                preview.mode = DataMode::Preview { key, value };
+            }
+        }
+    }
+
+    fn copy_selected_version_preview_value(&mut self) {
+        let Some(value) = self.selected_version_preview_value() else {
+            return;
+        };
+        match self.clipboard.copy(&value) {
+            Ok(()) => self.set_status(StatusKind::Success, "Copied to clipboard"),
+            Err(err) => self.set_status(StatusKind::Error, err.to_string()),
+        }
+    }
+
+    fn restore_selected_version(&mut self) {
+        if !self.can_update {
+            self.set_status(StatusKind::Error, "no permission to restore versions here");
+            return;
+        }
+        if self.selected_version_is_destroyed() {
+            self.set_status(StatusKind::Error, "destroyed versions cannot be restored");
+            return;
+        }
+        if self.selected_version_is_soft_deleted() {
+            self.set_status(
+                StatusKind::Info,
+                "soft-deleted versions must be undeleted before restore",
+            );
+            return;
+        }
+        let Some(version) = self.selected_version_number() else {
+            return;
+        };
+        let Some(versions) = &self.versions else {
+            return;
+        };
+        self.spawn_restore_version(
+            CacheKey {
+                mount: self.secrets_engine.clone(),
+                path: versions.key.clone(),
+            },
+            version,
+        );
+    }
+
+    fn undelete_selected_version(&mut self) {
+        if !self.can_undelete {
+            self.set_status(StatusKind::Error, "no permission to undelete versions here");
+            return;
+        }
+        if self.selected_version_is_destroyed() {
+            self.set_status(StatusKind::Error, "destroyed versions cannot be undeleted");
+            return;
+        }
+        let Some(version) = self.selected_version_number() else {
+            return;
+        };
+        if !self.selected_version_is_soft_deleted() {
+            self.set_status(
+                StatusKind::Info,
+                format!("version {version} is not deleted"),
+            );
+            return;
+        }
+        let Some(versions) = &self.versions else {
+            return;
+        };
+        self.spawn_undelete_version(
+            CacheKey {
+                mount: self.secrets_engine.clone(),
+                path: versions.key.clone(),
+            },
+            version,
+        );
+    }
+
+    fn open_soft_delete_latest_prompt(&mut self) {
+        if !self.can_soft_delete {
+            self.set_status(
+                StatusKind::Error,
+                "no permission to soft-delete latest version here",
+            );
+            return;
+        }
+        let Some(secret) = &self.secret_data else {
+            return;
+        };
+        let version = secret.data.metadata.version;
+        let key = CacheKey {
+            mount: self.secrets_engine.clone(),
+            path: secret.key.clone(),
+        };
+        self.spawn_soft_delete_latest(key, version);
+    }
+
+    fn open_destroy_version_prompt(&mut self) {
+        if !self.can_destroy {
+            self.set_status(StatusKind::Error, "no permission to destroy versions here");
+            return;
+        }
+        if self.selected_version_is_destroyed() {
+            self.set_status(StatusKind::Info, "version is already destroyed");
+            return;
+        }
+        let Some(version) = self.selected_version_number() else {
+            return;
+        };
+        self.prompt = Some(PromptState {
+            kind: PromptKind::DestroyVersion,
+            input: String::new(),
+            error: None,
+            expected: Some(version.to_string()),
+        });
     }
 
     fn preview_selected_value(&mut self) {
@@ -1037,6 +1578,7 @@ impl<V: VaultApi + 'static> App<V> {
 
     fn spawn_load_secrets(&mut self, key: CacheKey) {
         let generation = self.store.bump_generation();
+        self.reset_permissions();
         self.spawn_load_secrets_with_generation(key, generation);
     }
 
@@ -1053,34 +1595,248 @@ impl<V: VaultApi + 'static> App<V> {
         path: &SecretPath,
         leaf: bool,
     ) {
-        let probe = if leaf {
+        let data_probe = if leaf {
             format!("{}/data/{}", mount.as_str(), path.as_str())
         } else {
             format!("{mount}/data/{path}{CAPABILITY_PROBE}")
         };
+        let metadata_probe = format!("{mount}/metadata/{path}");
+        let soft_delete_probe = format!("{mount}/delete/{path}");
+        let destroy_probe = format!("{mount}/destroy/{path}");
+        let undelete_probe = format!("{mount}/undelete/{path}");
+        let paths = vec![
+            data_probe.clone(),
+            metadata_probe.clone(),
+            soft_delete_probe.clone(),
+            destroy_probe.clone(),
+            undelete_probe.clone(),
+        ];
         let vault = Arc::clone(&self.vault);
         self.spawn_msg(self.tx.clone(), async move {
-            let (writable, deletable) = match tokio::time::timeout(
+            let (create, update, soft_delete, metadata_delete, destroy, undelete) =
+                match tokio::time::timeout(TASK_TIMEOUT, vault.capabilities_self(&paths)).await {
+                    Ok(Ok(caps)) => {
+                        let data_caps = caps.get(&data_probe).map_or(&[][..], Vec::as_slice);
+                        let metadata_caps =
+                            caps.get(&metadata_probe).map_or(&[][..], Vec::as_slice);
+                        let soft_delete_caps =
+                            caps.get(&soft_delete_probe).map_or(&[][..], Vec::as_slice);
+                        let destroy_caps = caps.get(&destroy_probe).map_or(&[][..], Vec::as_slice);
+                        let undelete_caps =
+                            caps.get(&undelete_probe).map_or(&[][..], Vec::as_slice);
+                        (
+                            caps_allow_create(data_caps),
+                            caps_allow_update(data_caps),
+                            caps_allow_soft_delete(soft_delete_caps),
+                            caps_allow_delete(metadata_caps),
+                            caps_allow_destroy(destroy_caps),
+                            caps_allow_undelete(undelete_caps),
+                        )
+                    }
+                    _ => (false, false, false, false, false, false),
+                };
+            Msg::Capabilities {
+                generation,
+                create,
+                update,
+                soft_delete,
+                metadata_delete,
+                destroy,
+                undelete,
+            }
+        });
+    }
+
+    fn spawn_load_versions(&mut self, key: CacheKey) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        self.spawn_load_versions_with_generation(key, generation);
+    }
+
+    fn spawn_load_versions_with_generation(&mut self, key: CacheKey, generation: u64) {
+        self.reset_permissions();
+        let probe_mount = key.mount.clone();
+        let probe_path = key.path.clone();
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            match tokio::time::timeout(TASK_TIMEOUT, vault.read_kv_metadata(&key.mount, &key.path))
+                .await
+            {
+                Ok(Ok(history)) => Msg::VersionsLoaded {
+                    generation,
+                    key,
+                    history,
+                },
+                Ok(Err(err)) if err.status() == Some(404) => Msg::PathNotFound { generation, key },
+                Ok(Err(err)) => Msg::Failure {
+                    generation,
+                    message: err.message(),
+                },
+                Err(_elapsed) => timeout_msg(generation),
+            }
+        });
+        self.spawn_capabilities(generation, &probe_mount, &probe_path, true);
+    }
+
+    fn spawn_load_version_preview(&mut self, key: CacheKey, version: u64) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            match tokio::time::timeout(
                 TASK_TIMEOUT,
-                vault.capabilities_self(std::slice::from_ref(&probe)),
+                vault.read_kv_version(&key.mount, &key.path, version),
             )
             .await
             {
-                Ok(Ok(caps)) => caps.get(&probe).map_or((false, false), |list| {
-                    let has = |cap: &str| list.iter().any(|entry| entry == cap);
-                    // `root` is the literal capability of the root token.
-                    let root = has("root");
-                    (
-                        root || has("create") || has("update"),
-                        root || has("delete"),
+                Ok(Ok(data)) => Msg::SecretVersionLoaded {
+                    generation,
+                    key,
+                    version,
+                    data,
+                },
+                Ok(Err(err)) if err.status() == Some(404) => Msg::Failure {
+                    generation,
+                    message: format!("version {version} is unavailable: {}", err.message()),
+                },
+                Ok(Err(err)) => Msg::Failure {
+                    generation,
+                    message: err.message(),
+                },
+                Err(_elapsed) => timeout_msg(generation),
+            }
+        });
+    }
+
+    fn spawn_soft_delete_latest(&mut self, key: CacheKey, version: u64) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            match tokio::time::timeout(
+                TASK_TIMEOUT,
+                vault.delete_kv_secret_version(&key.mount, &key.path, version),
+            )
+            .await
+            {
+                Ok(Ok(())) => Msg::SecretVersionDeleted {
+                    generation,
+                    key,
+                    version,
+                },
+                Ok(Err(err)) => Msg::Failure {
+                    generation,
+                    message: err.message(),
+                },
+                Err(_elapsed) => timeout_msg(generation),
+            }
+        });
+    }
+
+    fn spawn_undelete_version(&mut self, key: CacheKey, version: u64) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            match tokio::time::timeout(
+                TASK_TIMEOUT,
+                vault.undelete_kv_secret_version(&key.mount, &key.path, version),
+            )
+            .await
+            {
+                Ok(Ok(())) => Msg::SecretVersionUndeleted {
+                    generation,
+                    key,
+                    version,
+                },
+                Ok(Err(err)) => Msg::Failure {
+                    generation,
+                    message: err.message(),
+                },
+                Err(_elapsed) => timeout_msg(generation),
+            }
+        });
+    }
+
+    fn spawn_destroy_version(&mut self, key: CacheKey, version: u64) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            match tokio::time::timeout(
+                TASK_TIMEOUT,
+                vault.destroy_kv_secret_version(&key.mount, &key.path, version),
+            )
+            .await
+            {
+                Ok(Ok(())) => Msg::SecretVersionDestroyed {
+                    generation,
+                    key,
+                    version,
+                },
+                Ok(Err(err)) => Msg::Failure {
+                    generation,
+                    message: err.message(),
+                },
+                Err(_elapsed) => timeout_msg(generation),
+            }
+        });
+    }
+
+    fn spawn_restore_version(&mut self, key: CacheKey, version: u64) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            match tokio::time::timeout(
+                TASK_TIMEOUT,
+                vault.read_kv_version(&key.mount, &key.path, version),
+            )
+            .await
+            {
+                Ok(Ok(data)) => {
+                    let missing = VaultError::Api {
+                        status: 404,
+                        path: key.path.as_str().to_owned(),
+                        detail: "missing".to_owned(),
+                    };
+                    if data.metadata.deletion_time.is_some() || data.metadata.destroyed {
+                        return Msg::Failure {
+                            generation,
+                            message: format!(
+                                "version {version} is unavailable: {}",
+                                missing.message()
+                            ),
+                        };
+                    }
+                    let payload: BTreeMap<String, String> = data
+                        .data
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.expose_secret().to_owned()))
+                        .collect();
+                    match tokio::time::timeout(
+                        TASK_TIMEOUT,
+                        vault.write_kv_secret(&key.mount, &key.path, &payload),
                     )
-                }),
-                _ => (false, false),
-            };
-            Msg::Capabilities {
-                generation,
-                writable,
-                deletable,
+                    .await
+                    {
+                        Ok(Ok(())) => Msg::SecretVersionRestored {
+                            generation,
+                            key,
+                            source_version: version,
+                        },
+                        Ok(Err(err)) => Msg::Failure {
+                            generation,
+                            message: err.message(),
+                        },
+                        Err(_elapsed) => timeout_msg(generation),
+                    }
+                }
+                Ok(Err(err)) => Msg::Failure {
+                    generation,
+                    message: err.message(),
+                },
+                Err(_elapsed) => timeout_msg(generation),
             }
         });
     }
@@ -1141,7 +1897,7 @@ impl<V: VaultApi + 'static> App<V> {
     }
 
     fn open_new_secret_prompt(&mut self) {
-        if !self.can_write {
+        if !self.can_create {
             self.set_status(StatusKind::Error, "no permission to create secrets here");
             return;
         }
@@ -1149,6 +1905,7 @@ impl<V: VaultApi + 'static> App<V> {
             kind: PromptKind::NewSecret,
             input: String::new(),
             error: None,
+            expected: None,
         });
     }
 
@@ -1161,8 +1918,8 @@ impl<V: VaultApi + 'static> App<V> {
 
     /// Opens the delete confirmation for the selected leaf entry (directories
     /// are virtual in KV2 — their secrets must be removed individually).
-    fn open_delete_secret_prompt(&mut self) {
-        if !self.can_delete {
+    fn open_delete_secret_metadata_prompt(&mut self) {
+        if !self.can_metadata_delete {
             self.set_status(StatusKind::Error, "no permission to delete secrets here");
             return;
         }
@@ -1181,10 +1938,11 @@ impl<V: VaultApi + 'static> App<V> {
             kind: PromptKind::DeleteSecret,
             input: entry.name.as_str().to_owned(),
             error: None,
+            expected: None,
         });
     }
 
-    fn spawn_delete_secret(&mut self, key: CacheKey) {
+    fn spawn_delete_secret_metadata(&mut self, key: CacheKey) {
         let generation = self.store.bump_generation();
         self.pending = true;
         let vault = Arc::clone(&self.vault);
@@ -1195,7 +1953,7 @@ impl<V: VaultApi + 'static> App<V> {
             )
             .await
             {
-                Ok(Ok(())) => Msg::SecretDeleted { generation, key },
+                Ok(Ok(())) => Msg::SecretMetadataDeleted { generation, key },
                 Ok(Err(err)) => Msg::Failure {
                     generation,
                     message: format!(
@@ -1210,7 +1968,7 @@ impl<V: VaultApi + 'static> App<V> {
     }
 
     fn open_new_key_prompt(&mut self) {
-        if !self.can_write {
+        if !self.can_update {
             self.set_status(StatusKind::Error, "no permission to add keys here");
             return;
         }
@@ -1218,6 +1976,7 @@ impl<V: VaultApi + 'static> App<V> {
             kind: PromptKind::NewKey,
             input: String::new(),
             error: None,
+            expected: None,
         });
     }
 
@@ -1228,12 +1987,14 @@ impl<V: VaultApi + 'static> App<V> {
             KeyCode::Enter => self.submit_prompt(),
             KeyCode::Backspace => {
                 if let Some(prompt) = self.prompt.as_mut() {
-                    prompt.input.pop();
+                    if prompt.kind.accepts_input() {
+                        prompt.input.pop();
+                    }
                 }
             }
             KeyCode::Char(ch) => {
                 if let Some(prompt) = self.prompt.as_mut() {
-                    if prompt.kind != PromptKind::DeleteSecret {
+                    if prompt.kind.accepts_input() {
                         prompt.input.push(ch);
                     }
                 }
@@ -1247,6 +2008,12 @@ impl<V: VaultApi + 'static> App<V> {
         let Some(mut prompt) = self.prompt.take() else {
             return;
         };
+        if prompt.kind == PromptKind::DestroyVersion {
+            let typed = prompt.input.trim().to_owned();
+            let expected = prompt.expected.unwrap_or_default();
+            self.destroy_version(&typed, &expected);
+            return;
+        }
         let name = prompt.input.trim().to_owned();
         if name.is_empty() {
             prompt.error = Some("name cannot be empty".to_owned());
@@ -1256,16 +2023,40 @@ impl<V: VaultApi + 'static> App<V> {
         match prompt.kind {
             PromptKind::NewSecret => self.create_secret(&name),
             PromptKind::NewKey => self.add_key(&name),
-            PromptKind::DeleteSecret => self.delete_secret(&name),
+            PromptKind::DeleteSecret => self.delete_secret_metadata(&name),
+            PromptKind::DestroyVersion => {}
         }
     }
 
-    fn delete_secret(&mut self, name: &str) {
+    fn delete_secret_metadata(&mut self, name: &str) {
         let key = CacheKey {
             mount: self.secrets_engine.clone(),
             path: self.secrets_path.join(&SecretPath::new(name)),
         };
-        self.spawn_delete_secret(key);
+        self.spawn_delete_secret_metadata(key);
+    }
+
+    fn destroy_version(&mut self, name: &str, expected: &str) {
+        if name.trim() != expected {
+            self.prompt = Some(PromptState {
+                kind: PromptKind::DestroyVersion,
+                input: String::new(),
+                error: Some("typed value does not match required version".to_owned()),
+                expected: Some(expected.to_owned()),
+            });
+            return;
+        }
+        let Some(version) = expected.parse::<u64>().ok() else {
+            return;
+        };
+        let Some(versions) = &self.versions else {
+            return;
+        };
+        let key = CacheKey {
+            mount: self.secrets_engine.clone(),
+            path: versions.key.clone(),
+        };
+        self.spawn_destroy_version(key, version);
     }
 
     fn create_secret(&mut self, name: &str) {
@@ -1286,6 +2077,7 @@ impl<V: VaultApi + 'static> App<V> {
                 kind: PromptKind::NewKey,
                 input: name.to_owned(),
                 error: Some("key already exists".to_owned()),
+                expected: None,
             });
             return;
         }
@@ -1382,6 +2174,38 @@ fn secret_updated_text(path: &str) -> String {
     format!("Secret '{path}' updated successfully")
 }
 
+fn caps_has(caps: &[String], capability: &str) -> bool {
+    caps.iter().any(|entry| entry == capability)
+}
+
+fn caps_has_root(caps: &[String]) -> bool {
+    caps_has(caps, "root")
+}
+
+fn caps_allow_create(caps: &[String]) -> bool {
+    caps_has_root(caps) || caps_has(caps, "create")
+}
+
+fn caps_allow_update(caps: &[String]) -> bool {
+    caps_has_root(caps) || caps_has(caps, "update")
+}
+
+fn caps_allow_delete(caps: &[String]) -> bool {
+    caps_has_root(caps) || caps_has(caps, "delete")
+}
+
+fn caps_allow_soft_delete(caps: &[String]) -> bool {
+    caps_has_root(caps) || caps_has(caps, "update")
+}
+
+fn caps_allow_destroy(caps: &[String]) -> bool {
+    caps_has_root(caps) || caps_has(caps, "update")
+}
+
+fn caps_allow_undelete(caps: &[String]) -> bool {
+    caps_has_root(caps) || caps_has(caps, "update")
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -1400,7 +2224,7 @@ mod tests {
 
     use super::*;
     use crate::clipboard::ClipboardError;
-    use crate::model::KvMetadata;
+    use crate::model::{KvMetadata, KvVersionHistory, VersionMeta};
     use crate::vault::VaultApi;
 
     #[derive(Debug)]
@@ -1410,6 +2234,12 @@ mod tests {
         data: Mutex<HashMap<(SecretPath, SecretPath), KvData>>,
         writes: Mutex<Vec<WriteRecord>>,
         deletes: Mutex<Vec<(SecretPath, SecretPath)>>,
+        metadata: Mutex<HashMap<(SecretPath, SecretPath), KvVersionHistory>>,
+        version_reads: Mutex<Vec<(SecretPath, SecretPath, u64)>>,
+        version_data: Mutex<HashMap<(SecretPath, SecretPath, u64), KvData>>,
+        version_deletes: Mutex<Vec<(SecretPath, SecretPath, u64)>>,
+        version_undeletes: Mutex<Vec<(SecretPath, SecretPath, u64)>>,
+        version_destroys: Mutex<Vec<(SecretPath, SecretPath, u64)>>,
         writable_all: bool,
     }
 
@@ -1423,6 +2253,12 @@ mod tests {
                 data: Mutex::new(HashMap::new()),
                 writes: Mutex::new(Vec::new()),
                 deletes: Mutex::new(Vec::new()),
+                metadata: Mutex::new(HashMap::new()),
+                version_reads: Mutex::new(Vec::new()),
+                version_data: Mutex::new(HashMap::new()),
+                version_deletes: Mutex::new(Vec::new()),
+                version_undeletes: Mutex::new(Vec::new()),
+                version_destroys: Mutex::new(Vec::new()),
                 writable_all: true,
             }
         }
@@ -1449,6 +2285,48 @@ mod tests {
                 SecretPath::new("team/api"),
                 kv_data("old"),
             );
+            vault.insert_metadata(
+                SecretPath::new("secret"),
+                SecretPath::new("team/api"),
+                KvVersionHistory {
+                    current_version: 3,
+                    versions: vec![
+                        VersionMeta {
+                            version: 3,
+                            created_time: "2026-10-13T10:00:00Z".to_owned(),
+                            deletion_time: None,
+                            destroyed: false,
+                            is_current: true,
+                        },
+                        VersionMeta {
+                            version: 2,
+                            created_time: "2026-10-12T10:00:00Z".to_owned(),
+                            deletion_time: Some("2026-10-12T11:00:00Z".to_owned()),
+                            destroyed: false,
+                            is_current: false,
+                        },
+                        VersionMeta {
+                            version: 1,
+                            created_time: "2026-10-11T10:00:00Z".to_owned(),
+                            deletion_time: None,
+                            destroyed: true,
+                            is_current: false,
+                        },
+                    ],
+                },
+            );
+            vault.insert_version_data(
+                SecretPath::new("secret"),
+                SecretPath::new("team/api"),
+                3,
+                kv_data("v3"),
+            );
+            vault.insert_version_data(
+                SecretPath::new("secret"),
+                SecretPath::new("team/api"),
+                2,
+                kv_data("v2"),
+            );
             vault
         }
 
@@ -1468,6 +2346,26 @@ mod tests {
 
         fn writes(&self) -> Vec<WriteRecord> {
             self.writes.lock().expect("writes lock").clone()
+        }
+
+        fn insert_metadata(&self, mount: SecretPath, path: SecretPath, history: KvVersionHistory) {
+            self.metadata
+                .lock()
+                .expect("metadata lock")
+                .insert((mount, path), history);
+        }
+
+        fn insert_version_data(
+            &self,
+            mount: SecretPath,
+            path: SecretPath,
+            version: u64,
+            data: KvData,
+        ) {
+            self.version_data
+                .lock()
+                .expect("version data lock")
+                .insert((mount, path, version), data);
         }
     }
 
@@ -1520,6 +2418,49 @@ mod tests {
             }
         }
 
+        fn read_kv_metadata(
+            &self,
+            mount: &SecretPath,
+            path: &SecretPath,
+        ) -> impl Future<Output = Result<KvVersionHistory, VaultError>> + Send {
+            async move {
+                self.metadata
+                    .lock()
+                    .expect("metadata lock")
+                    .get(&(mount.clone(), path.clone()))
+                    .cloned()
+                    .ok_or_else(|| VaultError::Api {
+                        status: 404,
+                        path: path.as_str().to_owned(),
+                        detail: "missing".to_owned(),
+                    })
+            }
+        }
+
+        fn read_kv_version(
+            &self,
+            mount: &SecretPath,
+            path: &SecretPath,
+            version: u64,
+        ) -> impl Future<Output = Result<KvData, VaultError>> + Send {
+            async move {
+                self.version_reads
+                    .lock()
+                    .expect("version reads lock")
+                    .push((mount.clone(), path.clone(), version));
+                self.version_data
+                    .lock()
+                    .expect("version data lock")
+                    .get(&(mount.clone(), path.clone(), version))
+                    .cloned()
+                    .ok_or_else(|| VaultError::Api {
+                        status: 404,
+                        path: path.as_str().to_owned(),
+                        detail: "missing".to_owned(),
+                    })
+            }
+        }
+
         fn write_kv_secret(
             &self,
             mount: &SecretPath,
@@ -1554,6 +2495,51 @@ mod tests {
                     .entry((mount.clone(), path.parent()))
                     .or_default()
                     .retain(|entry| entry.name != path.child_name());
+                Ok(())
+            }
+        }
+
+        fn delete_kv_secret_version(
+            &self,
+            mount: &SecretPath,
+            path: &SecretPath,
+            version: u64,
+        ) -> impl Future<Output = Result<(), VaultError>> + Send {
+            async move {
+                self.version_deletes
+                    .lock()
+                    .expect("version deletes lock")
+                    .push((mount.clone(), path.clone(), version));
+                Ok(())
+            }
+        }
+
+        fn undelete_kv_secret_version(
+            &self,
+            mount: &SecretPath,
+            path: &SecretPath,
+            version: u64,
+        ) -> impl Future<Output = Result<(), VaultError>> + Send {
+            async move {
+                self.version_undeletes
+                    .lock()
+                    .expect("version undeletes lock")
+                    .push((mount.clone(), path.clone(), version));
+                Ok(())
+            }
+        }
+
+        fn destroy_kv_secret_version(
+            &self,
+            mount: &SecretPath,
+            path: &SecretPath,
+            version: u64,
+        ) -> impl Future<Output = Result<(), VaultError>> + Send {
+            async move {
+                self.version_destroys
+                    .lock()
+                    .expect("version destroys lock")
+                    .push((mount.clone(), path.clone(), version));
                 Ok(())
             }
         }
@@ -1635,6 +2621,7 @@ mod tests {
                 version: 1,
                 destroyed: false,
                 created_time: "2026-10-13T10:00:00Z".to_owned(),
+                deletion_time: None,
             },
         }
     }
@@ -1655,6 +2642,38 @@ mod tests {
 
     fn ctrl(ch: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+    }
+
+    fn versions_fixture(path: &str) -> VersionsUi {
+        VersionsUi {
+            key: SecretPath::new(path),
+            current_version: 3,
+            versions: vec![
+                VersionMeta {
+                    version: 3,
+                    created_time: "2026-10-13T10:00:00Z".to_owned(),
+                    deletion_time: None,
+                    destroyed: false,
+                    is_current: true,
+                },
+                VersionMeta {
+                    version: 2,
+                    created_time: "2026-10-12T10:00:00Z".to_owned(),
+                    deletion_time: Some("2026-10-12T11:00:00Z".to_owned()),
+                    destroyed: false,
+                    is_current: false,
+                },
+                VersionMeta {
+                    version: 1,
+                    created_time: "2026-10-11T10:00:00Z".to_owned(),
+                    deletion_time: None,
+                    destroyed: true,
+                    is_current: false,
+                },
+            ],
+            selected: 0,
+            preview: None,
+        }
     }
 
     #[test]
@@ -1877,7 +2896,7 @@ mod tests {
         // Given: a read-only token in the secrets view.
         let (mut app, _rx, _vault) = test_app();
         app.state = AppState::Main(Mode::Secrets);
-        app.can_write = false;
+        app.can_create = false;
 
         // When: `n` is pressed.
         app.handle_input(key(KeyCode::Char('n')));
@@ -1892,7 +2911,7 @@ mod tests {
         // Given: a writable token in the secrets view.
         let (mut app, _rx, _vault) = test_app();
         app.state = AppState::Main(Mode::Secrets);
-        app.can_write = true;
+        app.can_create = true;
 
         // When: `n` opens the prompt and characters are typed.
         app.handle_input(key(KeyCode::Char('n')));
@@ -1917,7 +2936,7 @@ mod tests {
         app.state = AppState::Main(Mode::Secrets);
         app.secrets_engine = SecretPath::new("secret");
         app.secrets_path = SecretPath::root();
-        app.can_write = true;
+        app.can_create = true;
 
         // When: `n`, a name and Enter are pressed.
         app.handle_input(key(KeyCode::Char('n')));
@@ -1957,7 +2976,7 @@ mod tests {
             original_data: original,
         });
         app.state = AppState::Main(Mode::SecretData);
-        app.can_write = true;
+        app.can_update = true;
 
         // When: `a`, a key name and Enter are pressed.
         app.handle_input(key(KeyCode::Char('a')));
@@ -1993,7 +3012,7 @@ mod tests {
             original_data: original,
         });
         app.state = AppState::Main(Mode::SecretData);
-        app.can_write = true;
+        app.can_update = true;
 
         // When: `a` with an existing key name.
         app.handle_input(key(KeyCode::Char('a')));
@@ -2015,10 +3034,10 @@ mod tests {
         app.state = AppState::Main(Mode::Secrets);
         app.secrets_engine = SecretPath::new("secret");
         app.secrets_path = SecretPath::new("team/");
-        app.can_delete = false;
+        app.can_metadata_delete = false;
 
-        // When: `d` is pressed on a leaf.
-        app.handle_input(key(KeyCode::Char('d')));
+        // When: `D` is pressed on a leaf.
+        app.handle_input(key(KeyCode::Char(keys::METADATA_DELETE)));
 
         // Then: no prompt opens and a permission error is shown.
         assert_eq!(app.prompt, None);
@@ -2032,7 +3051,7 @@ mod tests {
         app.state = AppState::Main(Mode::Secrets);
         app.secrets_engine = SecretPath::new("secret");
         app.secrets_path = SecretPath::root();
-        app.can_delete = true;
+        app.can_metadata_delete = true;
         app.apply(Msg::SecretsLoaded {
             generation: 0,
             key: app.current_secrets_key(),
@@ -2040,8 +3059,8 @@ mod tests {
         });
         app.secrets_selected = 0;
 
-        // When: `d` is pressed on the root listing where a directory is first.
-        app.handle_input(key(KeyCode::Char('d')));
+        // When: `D` is pressed on the root listing where a directory is first.
+        app.handle_input(key(KeyCode::Char(keys::METADATA_DELETE)));
 
         // Then: no confirmation opens; a virtual-directory hint is shown.
         assert_eq!(app.prompt, None);
@@ -2055,7 +3074,7 @@ mod tests {
         app.state = AppState::Main(Mode::Secrets);
         app.secrets_engine = SecretPath::new("secret");
         app.secrets_path = SecretPath::new("team/");
-        app.can_delete = true;
+        app.can_metadata_delete = true;
         app.apply(Msg::SecretsLoaded {
             generation: 0,
             key: app.current_secrets_key(),
@@ -2063,8 +3082,8 @@ mod tests {
         });
         app.secrets_selected = 0;
 
-        // When: `d` opens the confirmation and Enter confirms it.
-        app.handle_input(key(KeyCode::Char('d')));
+        // When: `D` opens the confirmation and Enter confirms it.
+        app.handle_input(key(KeyCode::Char(keys::METADATA_DELETE)));
         assert_eq!(app.secrets_model().entries[0].name.as_str(), "creds");
         app.handle_input(key(KeyCode::Enter));
 
@@ -2092,5 +3111,481 @@ mod tests {
             })
         };
         assert!(deleted);
+    }
+
+    #[tokio::test]
+    async fn secret_data_v_opens_versions_and_spawns_metadata_load() {
+        let (mut app, mut rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::SecretData);
+        app.secrets_engine = SecretPath::new("secret");
+        app.secret_data = Some(SecretDataUi {
+            key: SecretPath::new("team/api"),
+            data: kv_data("old"),
+            selected: 0,
+            mode: DataMode::ListOnly,
+            original_data: kv_data("old").data,
+        });
+
+        app.handle_input(key(KeyCode::Char(keys::VERSIONS)));
+
+        let msg = rx.recv().await.expect("message");
+        assert!(matches!(msg, Msg::VersionsLoaded { .. }));
+    }
+
+    #[test]
+    fn versions_escape_returns_to_secret_data() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Versions);
+        app.versions = Some(versions_fixture("team/api"));
+
+        app.handle_input(key(KeyCode::Esc));
+
+        assert_eq!(app.state, AppState::Main(Mode::SecretData));
+    }
+
+    #[tokio::test]
+    async fn versions_enter_loads_selected_version_preview() {
+        let (mut app, mut rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Versions);
+        app.secrets_engine = SecretPath::new("secret");
+        app.versions = Some(versions_fixture("team/api"));
+
+        app.handle_input(key(KeyCode::Enter));
+
+        let msg = rx.recv().await.expect("message");
+        assert!(matches!(msg, Msg::SecretVersionLoaded { version: 3, .. }));
+    }
+
+    #[tokio::test]
+    async fn versions_restore_reads_version_and_writes_new_latest() {
+        let (mut app, mut rx, vault) = test_app();
+        app.state = AppState::Main(Mode::Versions);
+        app.secrets_engine = SecretPath::new("secret");
+        app.can_update = true;
+        app.versions = Some(versions_fixture("team/api"));
+
+        app.handle_input(key(KeyCode::Char(keys::RESTORE)));
+
+        let msg = rx.recv().await.expect("message");
+        assert!(matches!(
+            msg,
+            Msg::SecretVersionRestored {
+                source_version: 3,
+                ..
+            }
+        ));
+        let reads = vault.version_reads.lock().expect("reads lock").clone();
+        assert!(reads.iter().any(|(m, p, v)| {
+            m == &SecretPath::new("secret") && p == &SecretPath::new("team/api") && *v == 3
+        }));
+        let writes = vault.writes();
+        assert!(writes.iter().any(|(m, p, data)| {
+            m == &SecretPath::new("secret")
+                && p == &SecretPath::new("team/api")
+                && data.get("password").is_some_and(|value| value == "v3")
+        }));
+    }
+
+    #[tokio::test]
+    async fn versions_undelete_reloads_versions_after_success() {
+        let (mut app, mut rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Versions);
+        app.secrets_engine = SecretPath::new("secret");
+        app.can_undelete = true;
+        let mut versions = versions_fixture("team/api");
+        versions.selected = 1;
+        app.versions = Some(versions);
+
+        app.handle_input(key(KeyCode::Char(keys::UNDELETE)));
+
+        let msg = rx.recv().await.expect("undelete message");
+        app.apply(msg);
+        let reload = rx.recv().await.expect("reload message");
+        assert!(matches!(reload, Msg::VersionsLoaded { .. }));
+    }
+
+    #[tokio::test]
+    async fn versions_destroy_prompt_requires_exact_version_text() {
+        let (mut app, mut rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Versions);
+        app.secrets_engine = SecretPath::new("secret");
+        app.can_destroy = true;
+        app.versions = Some(versions_fixture("team/api"));
+
+        app.handle_input(key(KeyCode::Char(keys::DESTROY)));
+        app.handle_input(key(KeyCode::Char('2')));
+        app.handle_input(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.prompt
+                .as_ref()
+                .and_then(|prompt| prompt.error.as_deref()),
+            Some("typed value does not match required version")
+        );
+
+        app.handle_input(key(KeyCode::Char('3')));
+        app.handle_input(key(KeyCode::Enter));
+        let msg = rx.recv().await.expect("destroy message");
+        assert!(matches!(
+            msg,
+            Msg::SecretVersionDestroyed { version: 3, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn secret_data_d_soft_deletes_latest_without_evicting_parent_listing() {
+        let (mut app, mut rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::SecretData);
+        app.secrets_engine = SecretPath::new("secret");
+        app.can_soft_delete = true;
+        app.secrets_path = SecretPath::new("team/");
+        app.secret_data = Some(SecretDataUi {
+            key: SecretPath::new("team/api"),
+            data: kv_data("old"),
+            selected: 0,
+            mode: DataMode::ListOnly,
+            original_data: kv_data("old").data,
+        });
+        let generation = app.store.bump_generation();
+        let parent = CacheKey {
+            mount: SecretPath::new("secret"),
+            path: SecretPath::new("team/"),
+        };
+        app.apply(Msg::SecretsLoaded {
+            generation,
+            key: parent.clone(),
+            entries: vec![SecretEntry::leaf("api")],
+        });
+
+        app.handle_input(key(KeyCode::Char('d')));
+
+        let msg = rx.recv().await.expect("delete message");
+        app.apply(msg);
+        assert_eq!(
+            app.store.secrets(&parent),
+            Some([SecretEntry::leaf("api")].as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn secrets_upper_d_metadata_delete_reloads_parent_listing() {
+        let (mut app, mut rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Secrets);
+        app.secrets_engine = SecretPath::new("secret");
+        app.secrets_path = SecretPath::new("team/");
+        app.can_metadata_delete = true;
+        app.apply(Msg::SecretsLoaded {
+            generation: 0,
+            key: app.current_secrets_key(),
+            entries: vec![SecretEntry::leaf("api")],
+        });
+        app.secrets_selected = 0;
+
+        app.handle_input(key(KeyCode::Char(keys::METADATA_DELETE)));
+        app.handle_input(key(KeyCode::Enter));
+
+        let msg = rx.recv().await.expect("delete message");
+        app.apply(msg);
+        let reload = rx.recv().await.expect("reload message");
+        assert!(matches!(reload, Msg::SecretsLoaded { .. }));
+    }
+
+    #[test]
+    fn capabilities_message_updates_create_update_soft_delete_metadata_delete_destroy_flags() {
+        let (mut app, _rx, _vault) = test_app();
+        let generation = app.store.bump_generation();
+
+        app.apply(Msg::Capabilities {
+            generation,
+            create: true,
+            update: false,
+            soft_delete: true,
+            metadata_delete: false,
+            destroy: true,
+            undelete: true,
+        });
+
+        assert!(app.can_create);
+        assert!(!app.can_update);
+        assert!(app.can_soft_delete);
+        assert!(!app.can_metadata_delete);
+        assert!(app.can_destroy);
+        assert!(app.can_undelete);
+    }
+
+    #[test]
+    fn stale_versions_loaded_message_is_dropped_by_generation() {
+        let (mut app, _rx, _vault) = test_app();
+        let generation = app.store.bump_generation();
+
+        app.apply(Msg::VersionsLoaded {
+            generation: generation.saturating_sub(1),
+            key: CacheKey {
+                mount: SecretPath::new("secret"),
+                path: SecretPath::new("team/api"),
+            },
+            history: KvVersionHistory {
+                current_version: 3,
+                versions: Vec::new(),
+            },
+        });
+
+        assert!(app.versions.is_none());
+    }
+
+    #[test]
+    fn stale_versions_loaded_with_matching_secret_data_does_not_open_versions_mode() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::SecretData);
+        app.secret_data = Some(SecretDataUi {
+            key: SecretPath::new("team/api"),
+            data: kv_data("old"),
+            selected: 0,
+            mode: DataMode::ListOnly,
+            original_data: kv_data("old").data,
+        });
+        let current = app.store.bump_generation();
+
+        app.apply(Msg::VersionsLoaded {
+            generation: current.saturating_sub(1),
+            key: CacheKey {
+                mount: SecretPath::new("secret"),
+                path: SecretPath::new("team/api"),
+            },
+            history: KvVersionHistory {
+                current_version: 3,
+                versions: Vec::new(),
+            },
+        });
+
+        assert_eq!(app.state, AppState::Main(Mode::SecretData));
+        assert!(app.versions.is_none());
+    }
+
+    #[test]
+    fn stale_path_not_found_does_not_clear_state() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Versions);
+        app.secret_data = Some(SecretDataUi {
+            key: SecretPath::new("team/api"),
+            data: kv_data("old"),
+            selected: 0,
+            mode: DataMode::ListOnly,
+            original_data: kv_data("old").data,
+        });
+        app.versions = Some(versions_fixture("team/api"));
+        let current = app.store.bump_generation();
+
+        app.apply(Msg::PathNotFound {
+            generation: current.saturating_sub(1),
+            key: CacheKey {
+                mount: SecretPath::new("secret"),
+                path: SecretPath::new("team/api"),
+            },
+        });
+
+        assert_eq!(app.state, AppState::Main(Mode::Versions));
+        assert!(app.secret_data.is_some());
+        assert!(app.versions.is_some());
+    }
+
+    #[tokio::test]
+    async fn stale_secret_version_deleted_does_not_spawn_reload() {
+        let (mut app, mut rx, _vault) = test_app();
+        let current = app.store.bump_generation();
+
+        app.apply(Msg::SecretVersionDeleted {
+            generation: current.saturating_sub(1),
+            key: CacheKey {
+                mount: SecretPath::new("secret"),
+                path: SecretPath::new("team/api"),
+            },
+            version: 3,
+        });
+
+        let received = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(received.is_err());
+    }
+
+    #[test]
+    fn versions_selection_change_clears_preview() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Versions);
+        let mut versions = versions_fixture("team/api");
+        versions.preview = Some(VersionPreviewUi {
+            data: kv_data("v3"),
+            version: 3,
+            selected: 0,
+            mode: DataMode::ListOnly,
+        });
+        app.versions = Some(versions);
+
+        app.handle_input(key(KeyCode::Down));
+
+        assert!(
+            app.versions
+                .as_ref()
+                .and_then(|v| v.preview.as_ref())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn stale_preview_response_for_previous_selection_is_ignored() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Versions);
+        app.secrets_engine = SecretPath::new("secret");
+        let mut versions = versions_fixture("team/api");
+        versions.selected = 1;
+        app.versions = Some(versions);
+        let generation = app.store.bump_generation();
+
+        app.apply(Msg::SecretVersionLoaded {
+            generation,
+            key: CacheKey {
+                mount: SecretPath::new("secret"),
+                path: SecretPath::new("team/api"),
+            },
+            version: 3,
+            data: kv_data("v3"),
+        });
+
+        assert!(
+            app.versions
+                .as_ref()
+                .and_then(|v| v.preview.as_ref())
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn version_preview_read_404_reports_failure_without_path_not_found() {
+        let (mut app, mut rx, vault) = test_app();
+        app.state = AppState::Main(Mode::Versions);
+        app.secrets_engine = SecretPath::new("secret");
+        app.versions = Some(versions_fixture("team/api"));
+        vault
+            .version_data
+            .lock()
+            .expect("version data lock")
+            .remove(&(SecretPath::new("secret"), SecretPath::new("team/api"), 3));
+
+        app.handle_input(key(KeyCode::Enter));
+
+        let msg = rx.recv().await.expect("message");
+        assert!(matches!(msg, Msg::Failure { .. }));
+        app.apply(msg);
+        assert!(app.secret_data.is_none());
+        assert_eq!(app.state, AppState::Main(Mode::Versions));
+    }
+
+    #[test]
+    fn undelete_non_deleted_version_shows_info_and_skips_request() {
+        let (mut app, _rx, vault) = test_app();
+        app.state = AppState::Main(Mode::Versions);
+        app.secrets_engine = SecretPath::new("secret");
+        app.can_undelete = true;
+        app.versions = Some(versions_fixture("team/api"));
+
+        app.handle_input(key(KeyCode::Char(keys::UNDELETE)));
+
+        assert_eq!(
+            app.status.as_ref().map(|status| status.text.as_str()),
+            Some("version 3 is not deleted")
+        );
+        assert!(
+            vault
+                .version_undeletes
+                .lock()
+                .expect("undeletes lock")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn versions_restore_reloads_history_with_current_generation() {
+        let (mut app, mut rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Versions);
+        app.secrets_engine = SecretPath::new("secret");
+        app.versions = Some(versions_fixture("team/api"));
+        let key = CacheKey {
+            mount: SecretPath::new("secret"),
+            path: SecretPath::new("team/api"),
+        };
+        let generation = app.store.generation();
+
+        app.apply(Msg::SecretVersionRestored {
+            generation,
+            key,
+            source_version: 2,
+        });
+
+        let msg = rx.recv().await.expect("versions reload");
+        assert!(matches!(msg, Msg::VersionsLoaded { .. }));
+        assert_eq!(msg.generation(), app.store.generation());
+    }
+
+    #[tokio::test]
+    async fn open_versions_uses_shared_generation_for_capabilities_message() {
+        let (mut app, mut rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::SecretData);
+        app.secrets_engine = SecretPath::new("secret");
+        app.secret_data = Some(SecretDataUi {
+            key: SecretPath::new("team/api"),
+            data: kv_data("old"),
+            selected: 0,
+            mode: DataMode::ListOnly,
+            original_data: kv_data("old").data,
+        });
+
+        app.handle_input(key(KeyCode::Char(keys::VERSIONS)));
+
+        let first = rx.recv().await.expect("first message");
+        let second = rx.recv().await.expect("second message");
+        let generation_of = |msg: &Msg| msg.generation();
+
+        assert_eq!(generation_of(&first), generation_of(&second));
+    }
+
+    #[test]
+    fn leaving_secret_data_resets_permissions() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::SecretData);
+        app.can_create = true;
+        app.can_update = true;
+        app.can_soft_delete = true;
+        app.can_metadata_delete = true;
+        app.can_destroy = true;
+        app.can_undelete = true;
+
+        app.handle_input(key(KeyCode::Esc));
+
+        assert_eq!(app.state, AppState::Main(Mode::Secrets));
+        assert!(!app.can_create);
+        assert!(!app.can_update);
+        assert!(!app.can_soft_delete);
+        assert!(!app.can_metadata_delete);
+        assert!(!app.can_destroy);
+        assert!(!app.can_undelete);
+    }
+
+    #[test]
+    fn destroy_prompt_empty_input_shows_typed_value_error() {
+        let (mut app, _rx, _vault) = test_app();
+        app.prompt = Some(PromptState {
+            kind: PromptKind::DestroyVersion,
+            input: String::new(),
+            error: None,
+            expected: Some("3".to_owned()),
+        });
+
+        app.handle_input(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.prompt
+                .as_ref()
+                .and_then(|prompt| prompt.error.as_deref()),
+            Some("typed value does not match required version")
+        );
     }
 }
