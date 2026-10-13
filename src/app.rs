@@ -1,35 +1,32 @@
 //! Application orchestration, input handling, background tasks, and root drawing.
 
-use std::{collections::BTreeMap, future::Future, sync::Arc, time::Instant};
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{
-    Frame,
-    layout::{Constraint, Layout, Rect},
-};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Layout, Rect};
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::mpsc;
 
-use crate::{
-    clipboard::{TextClipboard, default_clipboard},
-    config::Config,
-    constants::{NA_VALUE, STATUS_EXPIRY_SECS, keys},
-    model::{HealthInfo, KvData, SecretEntry, TokenInfo},
-    path::SecretPath,
-    state::Mode,
-    store::{CacheKey, Msg, Store},
-    theme::Theme,
-    ui::{
-        commands::{Page, Permission, draw_commands},
-        engines::{EnginesModel, draw_engines},
-        header::{HeaderModel, StatusKind, StatusLine, draw_header},
-        modal::{ModalField, ModalModel, draw_modal},
-        prompt::{PromptKind, PromptModel, draw_prompt},
-        secret_data::{DataMode, KeyRow, SecretDataModel, draw_secret_data},
-        secrets::{SecretsModel, draw_secrets, sort_entries},
-    },
-    vault::{VaultApi, VaultError},
-};
+use crate::clipboard::{TextClipboard, default_clipboard};
+use crate::config::Config;
+use crate::constants::{NA_VALUE, STATUS_EXPIRY_SECS, keys};
+use crate::model::{HealthInfo, KvData, SecretEntry, TokenInfo};
+use crate::path::SecretPath;
+use crate::state::Mode;
+use crate::store::{CacheKey, Msg, Store};
+use crate::theme::Theme;
+use crate::ui::commands::{Page, Permission, draw_commands};
+use crate::ui::engines::{EnginesModel, draw_engines};
+use crate::ui::header::{HeaderModel, StatusKind, StatusLine, draw_header};
+use crate::ui::modal::{ModalField, ModalModel, draw_modal};
+use crate::ui::prompt::{PromptKind, PromptModel, draw_prompt};
+use crate::ui::secret_data::{DataMode, KeyRow, SecretDataModel, draw_secret_data};
+use crate::ui::secrets::{SecretsModel, draw_secrets, sort_entries};
+use crate::vault::{VaultApi, VaultError};
 
 const TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -1391,13 +1388,17 @@ fn secret_updated_text(path: &str) -> String {
     reason = "tests use direct assertions and snapshot helpers"
 )]
 mod tests {
-    use std::{collections::HashMap, sync::Mutex};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::{clipboard::ClipboardError, model::KvMetadata, vault::VaultApi};
+    use crate::clipboard::ClipboardError;
+    use crate::model::KvMetadata;
+    use crate::vault::VaultApi;
 
     #[derive(Debug)]
     struct FakeVault {

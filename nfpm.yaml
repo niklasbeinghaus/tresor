@@ -1,0 +1,20 @@
+name: tresor
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${NFPM_VERSION}
+version_schema: semver
+section: utils
+priority: optional
+maintainer: Niklas Beinghaus <niklas.beinghaus@fiskaly.com>
+description: |
+  A k9s-style terminal UI for HashiCorp Vault and OpenBao.
+  Browse secret engines and KV2 secrets, reveal/edit/copy/create/delete
+  with capability-gated actions, themed via sofka skins.
+vendor: njoerd114
+homepage: https://github.com/njoerd114/tresor
+license: MIT OR Apache-2.0
+contents:
+  - src: ./tresor-linux-${NFPM_ARCH}
+    dst: /usr/bin/tresor
+    file_info:
+      mode: 0755

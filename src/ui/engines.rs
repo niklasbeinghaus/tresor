@@ -1,15 +1,15 @@
 //! Secret engine list renderer.
 
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::Style,
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
-};
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::row::row_line;
-use crate::{constants::titles, model::SecretEntry, theme::Theme};
+use crate::constants::titles;
+use crate::model::SecretEntry;
+use crate::theme::Theme;
 
 /// Data rendered by the secret engine list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,9 +67,12 @@ fn selected_index(selected: usize, len: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use insta::assert_snapshot;
-    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    use super::*;
 
     fn render(width: u16, height: u16, draw: impl FnOnce(&mut ratatui::Frame<'_>)) -> String {
         let backend = TestBackend::new(width, height);

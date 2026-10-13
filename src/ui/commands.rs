@@ -2,13 +2,11 @@
 //! left, current view title on the right. Renderer is stateless — it takes a
 //! [`Page`] and the theme, nothing else.
 
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
-};
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 
 use crate::theme::Theme;
 
@@ -158,9 +156,11 @@ pub fn draw_commands(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use insta::assert_snapshot;
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
 
     fn render(width: u16, height: u16, page: Page) -> String {
         let backend = TestBackend::new(width, height);

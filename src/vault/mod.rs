@@ -4,7 +4,8 @@
     reason = "project plan requires src/vault/mod.rs"
 )]
 
-use std::{collections::BTreeMap, future::Future};
+use std::collections::BTreeMap;
+use std::future::Future;
 
 pub use self::client::VaultClient;
 use crate::model::{HealthInfo, KvData, SecretEntry, TokenInfo};

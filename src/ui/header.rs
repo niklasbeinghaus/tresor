@@ -1,12 +1,10 @@
 //! Header view renderer.
 
-use ratatui::{
-    Frame,
-    layout::{Constraint, Layout, Rect},
-    style::{Color, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
-};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::theme::Theme;
 
@@ -113,9 +111,12 @@ const fn status_color(kind: StatusKind, theme: &Theme) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use insta::assert_snapshot;
-    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    use super::*;
 
     fn render(width: u16, height: u16, draw: impl FnOnce(&mut ratatui::Frame<'_>)) -> String {
         let backend = TestBackend::new(width, height);

@@ -42,11 +42,97 @@ supports **KV2 secret engines only** (same as the Go version).
 | `Ctrl+R` | hard refresh current path |
 | `Ctrl+C` | quit |
 
-## Install / build
+## Install
+
+### macOS & Linux — Homebrew
 
 ```bash
-cargo build --release          # -> target/release/tresor
-VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=... ./target/release/tresor
+brew install njoerd114/tresor/tresor
+```
+
+### Cargo (any platform with a Rust toolchain)
+
+```bash
+cargo install --git https://github.com/njoerd114/tresor
+# once published to crates.io:  cargo install tresor
+```
+
+### Prebuilt binaries (Releases)
+
+Every release attaches binaries for all targets. Pick yours, unpack, put it on `PATH`:
+
+```bash
+# example: linux x86_64
+curl -LO https://github.com/njoerd114/tresor/releases/latest/download/tresor-x86_64-unknown-linux-gnu.tar.gz
+tar xzf tresor-x86_64-unknown-linux-gnu.tar.gz
+install -m755 tresor-x86_64-unknown-linux-gnu ~/.local/bin/tresor
+```
+
+Targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
+
+### Linux distro packages (attached to each release)
+
+```bash
+# Debian / Ubuntu (apt / dpkg)
+curl -LO .../download/vX.Y.Z/tresor_X.Y.Z_linux_amd64.deb && sudo dpkg -i tresor_*.deb
+
+# Fedora / RHEL / openSUSE (dnf / yum / zypper)
+sudo rpm -i tresor_X.Y.Z_linux_amd64.rpm      # or: sudo dnf install ./tresor_*.rpm
+
+# Alpine (apk)
+sudo apk add --allow-untrusted tresor_X.Y.Z_linux_amd64.apk
+```
+
+The `.deb` / `.rpm` / `.apk` files are built with [nfpm](https://nfpm.goreleaser.com) —
+see the package job in `.github/workflows/release.yaml`. Dedicated APT/YUM/zypper
+repositories can be added later; today the packages live on the GitHub Release.
+
+### Arch Linux (yay / AUR)
+
+A `PKGBUILD` ships in the repository; build it locally today:
+
+```bash
+git clone https://github.com/njoerd114/tresor && cd tresor
+yay -Bi packaging/aur          # or: makepkg -si in packaging/aur
+```
+
+AUR publication (`yay -S tresor`) is a maintainer step, not automated yet.
+
+### Windows
+
+```powershell
+# scoop (manifest ships in the repo; add it to a bucket to get `scoop install tresor`)
+scoop install https://raw.githubusercontent.com/njoerd114/tresor/main/packaging/scoop/tresor.json
+```
+
+Or download `tresor-x86_64-pc-windows-msvc.zip` from the latest Release and put
+`tresor.exe` on your `PATH`. `winget` packaging can be added later.
+
+## Build from source
+
+```bash
+git clone https://github.com/njoerd114/tresor && cd tresor
+cargo build --release --locked        # -> target/release/tresor
+```
+
+Requirements: stable Rust (edition 2024, ≥ 1.85); the `fmt` check also needs nightly
+(`rustup toolchain install nightly --component rustfmt`).
+
+Verify your build the way CI does:
+
+```bash
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo +nightly fmt --all -- --check
+cargo machete && cargo deny check
+```
+
+Run it against a throwaway Vault or OpenBao:
+
+```bash
+scripts/dev-vault.sh                  # starts `vault server -dev` + seed KV2 data
+VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root ./target/release/tresor
 ```
 
 Without env vars the app opens a configuration modal to enter address + token.

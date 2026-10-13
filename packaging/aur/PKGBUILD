@@ -1,0 +1,33 @@
+# Maintainer: Niklas Beinghaus <niklas.beinghaus@fiskaly.com>
+# Arch Linux (AUR) package for tresor — build from source.
+#
+# Local build/install without publishing to the AUR:
+#   yay -Bi packaging/aur
+# Publish (AUR maintainer):
+#   git clone ssh://aur@aur.archlinux.org/tresor.git && cp PKGBUILD && makepkg --printsrcinfo > .SRCINFO
+pkgname=tresor
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A k9s-style terminal UI for HashiCorp Vault and OpenBao"
+arch=('x86_64' 'aarch64')
+url="https://github.com/njoerd114/tresor"
+license=('MIT' 'Apache')
+makedepends=('cargo' 'rust')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  cargo build --release --locked --frozen
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 "target/release/tresor" "$pkgdir/usr/bin/tresor"
+  install -Dm644 "LICENSE-MIT" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+  install -Dm644 "LICENSE-APACHE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+}
