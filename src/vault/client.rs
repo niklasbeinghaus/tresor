@@ -353,7 +353,6 @@ impl VaultApi for VaultClient {
         }
     }
 
-<<<<<<< HEAD
     fn renew_token_self(&self) -> impl std::future::Future<Output = Result<(), VaultError>> + Send {
         let url = format!("{}/v1/auth/token/renew-self", self.addr);
         let token = self.token.expose_secret().to_owned();

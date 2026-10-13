@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::model::{
     HealthInfo, KvData, MintedToken, PolicyDocument, PolicyEntry, SecretEntry, TokenInfo,
-    TokenInfo, WrappedToken,
+    WrappedToken,
 };
 use crate::path::SecretPath;
 

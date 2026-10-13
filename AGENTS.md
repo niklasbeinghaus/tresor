@@ -16,22 +16,14 @@ src/
 ├── store.rs       # Store (engines/secrets cache) + Msg enum + generation stale-drop
 ├── state.rs       # Mode + ViewStack breadcrumb
 ├── event.rs       # Command enum (pure; dispatch lives in app.rs)
-<<<<<<< HEAD
-├── model.rs       # boundary types: SecretEntry, KvData, KvMetadata, TokenInfo, MintedToken, WrappedToken, HealthInfo
-=======
-├── model.rs       # boundary types: SecretEntry, KvData, KvMetadata, TokenInfo, HealthInfo, PolicyEntry, PolicyDocument
->>>>>>> origin/main
+├── model.rs       # boundary types: SecretEntry, KvData, KvMetadata, TokenInfo, MintedToken, WrappedToken, HealthInfo, PolicyEntry, PolicyDocument
 ├── path.rs        # SecretPath newtype — trailing-slash dir semantics (parity with Go utils)
 ├── config.rs      # Config {addr, token}; BAO_*→VAULT_* env chain + CLI token file (~/.vault-token)
 ├── clipboard.rs   # TextClipboard trait + copypasta + CommandClipboard (pbcopy/xclip/wl-copy)
 ├── editor.rs      # TextEditor trait + CommandTextEditor ($VISUAL→$EDITOR), temp-file handoff
 ├── theme.rs       # semantic palette + sofka skins (catppuccin/gruvbox); default = sofka mocha
 ├── sofka.rs       # reuses ~/.config/sofka config [skin] (name + color overrides), graceful fallback
-<<<<<<< HEAD
-└── ui/            # PURE renderers: header, engines, secrets, secret_data, token, modal (+ insta snapshots)
-=======
-└── ui/            # PURE renderers: header, engines, secrets, secret_data, policies, command_line, modal, prompt (+ insta snapshots)
->>>>>>> origin/main
+└── ui/            # PURE renderers: header, engines, secrets, secret_data, token, policies, command_line, modal, prompt (+ insta snapshots)
 tests/vault_integration.rs  # wiremock wire-level tests of VaultClient
 scripts/dev-vault.sh + seed-vault.sh  # local `vault server -dev` + KV2 seed data
 ```

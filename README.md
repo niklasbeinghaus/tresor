@@ -20,15 +20,12 @@ supports **KV2 secret engines only** (same as the Go version).
 - `<e>` edit secret value (inline textarea), `Ctrl+S` save
 - `<c>` copy secret value to the system clipboard
 - `Ctrl+R` hard reload of the current path (with 404 backtrack)
-<<<<<<< HEAD
 - Token inspector (`:token`): `lookup-self` details, renew-self, and child-token
   creation (policies + TTL + use limit) — the minted token is shown once and copyable
 - Response wrapping: `:unwrap` a wrapping token into a pretty-printed payload, or
   `:wrap` a JSON payload with an optional TTL
-=======
 - `:policies` browses ACL policies with a read-only preview pane
 - `<e>` authors/edits a policy in your `$EDITOR` (never an in-TUI editor), `<n>` creates one
->>>>>>> origin/main
 - Vault header: address, sealed state, version, token policies/expiry
 - Config modal when `VAULT_ADDR`/`VAULT_TOKEN` are missing
 - Color-coded status line (errors/errors/info/success, auto-clear after 5s)

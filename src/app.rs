@@ -1275,8 +1275,7 @@ impl<V: VaultApi + 'static> App<V> {
     }
 
     fn open_command_prompt(&mut self) {
-        self.prompt = Some(PromptState {
-            kind: PromptKind::Command,
+        self.command_line = Some(CommandLineState {
             input: String::new(),
             error: None,
         });
@@ -1308,6 +1307,7 @@ impl<V: VaultApi + 'static> App<V> {
             kind,
             input: String::new(),
             error: None,
+            detail: None,
         });
     }
 
@@ -1316,6 +1316,7 @@ impl<V: VaultApi + 'static> App<V> {
             kind,
             input: String::new(),
             error: Some(error.into()),
+            detail: None,
         });
     }
 
@@ -2753,7 +2754,6 @@ mod tests {
             }
         }
 
-<<<<<<< HEAD
         fn renew_token_self(&self) -> impl Future<Output = Result<(), VaultError>> + Send {
             async move { Ok(()) }
         }
@@ -2794,7 +2794,7 @@ mod tests {
         ) -> impl Future<Output = Result<String, VaultError>> + Send {
             async move { Ok("{\n  \"password\": \"hunter2\"\n}".to_owned()) }
         }
-=======
+
         fn list_acl_policies(
             &self,
         ) -> impl Future<Output = Result<Vec<PolicyEntry>, VaultError>> + Send {
@@ -2839,7 +2839,6 @@ mod tests {
                 Ok(())
             }
         }
->>>>>>> origin/main
     }
 
     #[derive(Debug, Default)]
