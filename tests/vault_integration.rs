@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use secrecy::ExposeSecret as _;
 use serde_json::{Value, json};
-use tresor::model::{HealthInfo, SecretEntry, TokenInfo};
+use tresor::model::{HealthInfo, PolicyDocument, PolicyEntry, SecretEntry, TokenInfo};
 use tresor::path::SecretPath;
 use tresor::vault::{VaultApi as _, VaultClient, VaultError};
 use wiremock::matchers::{body_partial_json, header, method, path, query_param};
@@ -492,4 +492,178 @@ fn vault_data(data: Value) -> Value {
         "wrap_info": null,
         "auth": null
     })
+}
+
+#[tokio::test]
+async fn list_acl_policies_when_list_succeeds_returns_sorted_entries() {
+    let server = MockServer::start().await;
+    Mock::given(method("LIST"))
+        .and(path("/v1/sys/policies/acl"))
+        .and(vault_header())
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(vault_data(json!({"keys": ["team", "default"]}))),
+        )
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    let policies = client
+        .list_acl_policies()
+        .await
+        .expect("policies should parse");
+
+    assert_eq!(
+        policies,
+        vec![
+            PolicyEntry {
+                name: "default".to_owned()
+            },
+            PolicyEntry {
+                name: "team".to_owned()
+            }
+        ]
+    );
+}
+
+#[tokio::test]
+async fn list_acl_policies_when_list_rejected_falls_back_to_get_list_query() {
+    let server = MockServer::start().await;
+    Mock::given(method("LIST"))
+        .and(path("/v1/sys/policies/acl"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(400).set_body_string("Bad Request"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/sys/policies/acl"))
+        .and(query_param("list", "true"))
+        .and(vault_header())
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(vault_data(json!({"keys": ["default"]}))),
+        )
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    let policies = client
+        .list_acl_policies()
+        .await
+        .expect("fallback policies should parse");
+
+    assert_eq!(
+        policies,
+        vec![PolicyEntry {
+            name: "default".to_owned()
+        }]
+    );
+}
+
+#[tokio::test]
+async fn read_acl_policy_plain_text_parses() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/sys/policies/acl/team"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(200).set_body_json(vault_data(json!({
+            "name": "team",
+            "policy": "path \"secret/data/team/*\" { capabilities = [\"read\"] }"
+        }))))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    let policy = client
+        .read_acl_policy("team")
+        .await
+        .expect("policy should parse");
+
+    assert_eq!(
+        policy,
+        PolicyDocument {
+            name: "team".to_owned(),
+            policy: "path \"secret/data/team/*\" { capabilities = [\"read\"] }".to_owned()
+        }
+    );
+}
+
+#[tokio::test]
+async fn read_acl_policy_base64_prefixed_decodes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/sys/policies/acl/team"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(200).set_body_json(vault_data(json!({
+            "name": "team",
+            "policy": "base64:cGF0aCAic2VjcmV0L2RhdGEvdGVhbS8qIiB7IGNhcGFiaWxpdGllcyA9IFsicmVhZCJdIH0="
+        }))))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    let policy = client
+        .read_acl_policy("team")
+        .await
+        .expect("policy should decode");
+
+    assert_eq!(
+        policy.policy,
+        "path \"secret/data/team/*\" { capabilities = [\"read\"] }"
+    );
+}
+
+#[tokio::test]
+async fn read_acl_policy_missing_maps_404() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/sys/policies/acl/missing"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"errors": ["not found"]})))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    let error = client
+        .read_acl_policy("missing")
+        .await
+        .expect_err("missing policy should fail");
+
+    assert_eq!(error.status(), Some(404));
+}
+
+#[tokio::test]
+async fn write_acl_policy_puts_policy_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/v1/sys/policies/acl/team"))
+        .and(vault_header())
+        .and(body_partial_json(json!({"policy": "path \"secret/*\" {}"})))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    let result = client
+        .write_acl_policy("team", "path \"secret/*\" {}")
+        .await;
+
+    assert_eq!(result, Ok(()));
+}
+
+#[tokio::test]
+async fn write_acl_policy_403_maps_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/v1/sys/policies/acl/team"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"errors": ["denied"]})))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    let result = client
+        .write_acl_policy("team", "path \"secret/*\" {}")
+        .await;
+
+    assert!(matches!(result, Err(VaultError::Api { status: 403, .. })));
 }

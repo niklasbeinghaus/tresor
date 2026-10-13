@@ -19,6 +19,8 @@ pub enum Page {
     Engines,
     /// Hierarchical secret browser.
     Secrets,
+    /// ACL policies browser.
+    Policies,
     /// Secret key/value view.
     SecretData,
 }
@@ -31,6 +33,7 @@ impl Page {
             Self::Config => "Vault Configuration",
             Self::Engines => "[Secret Engines]",
             Self::Secrets => "Secrets",
+            Self::Policies => "[Policies]",
             Self::SecretData => "Secret Data",
         }
     }
@@ -61,6 +64,20 @@ impl Page {
                 ("enter", "open"),
                 ("esc", "back"),
                 ("^r", "refresh"),
+                ("j/k", "move"),
+            ],
+            (Self::Policies, true, _) => &[
+                ("enter", "preview"),
+                ("e", "edit"),
+                ("n", "new"),
+                ("esc", "engines"),
+                (":", "command"),
+                ("j/k", "move"),
+            ],
+            (Self::Policies, false, _) => &[
+                ("enter", "preview"),
+                ("esc", "engines"),
+                (":", "command"),
                 ("j/k", "move"),
             ],
             (Self::SecretData, true, _) => &[
@@ -212,6 +229,39 @@ mod tests {
         assert_snapshot!("commands_secrets", output);
         assert!(output.contains("^r refresh"));
         assert!(output.contains("Secrets"));
+    }
+
+    #[test]
+    fn commands_bar_policies_shows_contextual_hints() {
+        let backend = TestBackend::new(100, 1);
+        let mut terminal = Terminal::new(backend).expect("TestBackend");
+        terminal
+            .draw(|frame| {
+                draw_commands(
+                    frame,
+                    Rect::new(0, 0, 100, 1),
+                    Page::Policies,
+                    Permission::all(),
+                    &Theme::default(),
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut output = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                output.push_str(
+                    buffer
+                        .cell((x, y))
+                        .map_or("", ratatui::buffer::Cell::symbol),
+                );
+            }
+            output.push('\n');
+        }
+        assert!(output.contains("enter preview"));
+        assert!(output.contains("e edit"));
+        assert!(output.contains("n new"));
+        assert!(output.contains("[Policies]"));
     }
 
     #[test]
