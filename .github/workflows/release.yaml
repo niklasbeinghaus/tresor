@@ -1,0 +1,58 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { runner: macos-13, target: x86_64-apple-darwin }
+          - { runner: macos-latest, target: aarch64-apple-darwin }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: ""
+
+      - name: Package (unix)
+        if: ${{ !contains(matrix.target, 'windows') }}
+        run: |
+          set -euo pipefail
+          cp "target/${{ matrix.target }}/release/tresor" "tresor-${{ matrix.target }}"
+          tar czf "tresor-${{ matrix.target }}.tar.gz" "tresor-${{ matrix.target }}"
+
+      - name: Package (windows)
+        if: ${{ contains(matrix.target, 'windows') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "target/${{ matrix.target }}/release/tresor.exe" "tresor-${{ matrix.target }}.exe"
+          7z a "tresor-${{ matrix.target }}.zip" "tresor-${{ matrix.target }}.exe"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            tresor-*.tar.gz
+            tresor-*.zip
+          generate_release_notes: true

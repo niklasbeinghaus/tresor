@@ -1,0 +1,133 @@
+[package]
+name = "tresor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A k9s-style terminal UI for HashiCorp Vault and OpenBao (Rust rewrite of the Go vaultview)"
+repository = "https://github.com/njoerd114/tresor"
+readme = "README.md"
+license = "Apache-2.0 OR MIT"
+keywords = ["vault", "hashicorp", "openbao", "tui", "terminal"]
+categories = ["command-line-utilities"]
+default-run = "tresor"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_must_use = "deny"
+elided_lifetimes_in_paths = "warn"
+non_ascii_idents = "deny"
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
+single_use_lifetimes = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+mem_forget = "deny"
+# Project-wide relaxations (a TUI is index/cursor math; the strict defaults are noise):
+arithmetic_side_effects = "allow"
+# Internal app types stay exhaustive (construction happens in the same package);
+# `#[non_exhaustive]` would break struct-literal construction from main/tests.
+exhaustive_structs = "allow"
+exhaustive_enums = "allow"
+# Deep transitive duplicates from the ecosystem (tui-rs family, deprecated crates) —
+# not resolvable from our direct dependency list.
+multiple_crate_versions = "allow"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_precision_loss = "warn"
+cast_sign_loss = "warn"
+as_underscore = "deny"
+as_ptr_cast_mut = "deny"
+ptr_as_ptr = "warn"
+borrow_as_ptr = "warn"
+fn_to_numeric_cast_any = "deny"
+clone_on_ref_ptr = "warn"
+mutex_atomic = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+exit = "warn"
+allow_attributes_without_reason = "warn"
+dbg_macro = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+use_debug = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+mod_module_files = "warn"
+empty_drop = "warn"
+empty_structs_with_brackets = "warn"
+empty_enums = "warn"      # public enums should consider #[non_exhaustive]
+
+[dependencies]
+# NOTE: pinned to the ratatui 0.29 / crossterm 0.28 ecosystem because
+# tui-textarea 0.7 (the last published version) requires them; mixing in
+# ratatui 0.30 would silently break widget type compatibility.
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tokio = { version = "1", features = ["full"] }
+vaultrs = "0.8"
+tui-textarea = "0.7"
+copypasta = "0.10"
+# Direct HTTP for the lenient `/v1/sys/health` probe and KV2 list/read:
+# OpenBao omits/`null`s fields vaultrs requires strictly, and production
+# gateways behave differently per HTTP version — HTTP/2 + compression must be
+# on (the Go client negotiates h2 by default; h1-only requests got 400s).
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+    "http2",
+    "gzip",
+    "brotli",
+    "deflate",
+] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+secrecy = "0.10"
+futures = "0.3"
+
+[dev-dependencies]
+insta = { version = "1", features = ["yaml", "filters"] }
+proptest = "1"
+wiremock = "0.6"
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+debug = "line-tables-only"
+
+[profile.dev]
+opt-level = 0
+debug = true
+incremental = true
+codegen-units = 256
+split-debuginfo = "unpacked"
+
+[package.metadata.cargo-machete]
+# serde is used through derive macros only, which cargo-machete cannot see.
+ignored = ["serde"]

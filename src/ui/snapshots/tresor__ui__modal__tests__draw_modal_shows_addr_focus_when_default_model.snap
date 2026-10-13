@@ -1,0 +1,28 @@
+---
+source: src/ui/modal.rs
+expression: actual
+---
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                        ┌Vault Configuration───────────────────────────────────────────────────┐                        
+                        │                                                                      │                        
+                        │ Vault Address                                                        │                        
+                        │ https://vault.example.com                                            │                        
+                        │ Vault Token                                                          │                        
+                        │                                                                      │                        
+                        │                                                                      │                        
+                        │                                                                      │                        
+                        │                                                                      │                        
+                        │                                                                      │                        
+                        │                                                                      │                        
+                        │                                                                      │                        
+                        │                                                                      │                        
+                        │                                                                      │                        
+                        │                                                                      │                        
+                        │ Enter to connect · Esc to quit                                       │                        
+                        │                                                                      │                        
+                        └──────────────────────────────────────────────────────────────────────┘

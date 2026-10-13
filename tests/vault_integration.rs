@@ -1,0 +1,495 @@
+#![allow(
+    missing_docs,
+    clippy::expect_used,
+    clippy::needless_pass_by_value,
+    reason = "integration tests document behavior through Given/When/Then names; shared helpers outside #[test] bodies are not covered by clippy.toml allow-*-in-tests"
+)]
+
+use std::collections::BTreeMap;
+
+use secrecy::ExposeSecret as _;
+use serde_json::{Value, json};
+use tresor::model::{HealthInfo, SecretEntry, TokenInfo};
+use tresor::path::SecretPath;
+use tresor::vault::{VaultApi as _, VaultClient, VaultError};
+use wiremock::matchers::{body_partial_json, header, method, path, query_param};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+const TOKEN: &str = "dev-token";
+
+fn vault_client(server: &MockServer) -> VaultClient {
+    VaultClient::connect(&server.uri(), TOKEN).expect("wiremock URL should build a client")
+}
+
+fn vault_header() -> impl wiremock::Match {
+    header("X-Vault-Token", TOKEN)
+}
+
+fn mount_response(mount_type: &str, version: Option<&str>) -> Value {
+    json!({
+        "accessor": format!("{mount_type}_accessor"),
+        "config": {"default_lease_ttl": 0, "force_no_cache": false, "max_lease_ttl": 0},
+        "description": "",
+        "external_entropy_access": false,
+        "local": false,
+        "options": version.map(|v| json!({"version": v})),
+        "seal_wrap": false,
+        "type": mount_type,
+        "uuid": format!("{mount_type}-uuid")
+    })
+}
+
+#[tokio::test]
+async fn read_secret_engines_when_mounts_exist_returns_slashes_stripped() {
+    // Given: Vault exposes two mounted engines and requires the client token header.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/sys/mounts"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(200).set_body_json(vault_data(json!({
+            "secret/": mount_response("kv", Some("2")),
+            "cubbyhole/": mount_response("cubbyhole", None)
+        }))))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: engines are read through the Vault API boundary.
+    let engines = client
+        .read_secret_engines()
+        .await
+        .expect("mounts should parse");
+
+    // Then: every mount key is returned as a leaf entry without its trailing slash.
+    assert_eq!(
+        engines,
+        vec![SecretEntry::leaf("cubbyhole"), SecretEntry::leaf("secret")]
+    );
+}
+
+#[tokio::test]
+async fn sys_health_when_vault_responds_returns_health_info() {
+    // Given: Vault health returns the unwrapped sys/health response shape.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/sys/health"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "initialized": true,
+            "sealed": false,
+            "standby": false,
+            "performance_standby": false,
+            "replication_performance_mode": "disabled",
+            "replication_dr_mode": "disabled",
+            "server_time_utc": 1,
+            "version": "1.18.0"
+        })))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: health is read.
+    let health = client.sys_health().await.expect("health should parse");
+
+    // Then: only the UI model fields are retained.
+    assert_eq!(
+        health,
+        HealthInfo {
+            sealed: false,
+            version: "1.18.0".to_owned()
+        }
+    );
+}
+
+#[tokio::test]
+async fn sys_health_when_openbao_omits_vault_fields_still_parses() {
+    // Given: OpenBao health omits fields HashiCorp Vault returns (verified against
+    // `bao server -dev` 2.0.0-HEAD): no `performance_standby`, no `enterprise`.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/sys/health"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "initialized": true,
+            "sealed": false,
+            "standby": false,
+            "replication_performance_mode": "disabled",
+            "replication_dr_mode": "disabled",
+            "server_time_utc": 1_791_893_543,
+            "version": "2.0.0-HEAD",
+            "cluster_name": "vault-cluster",
+            "cluster_id": "eb2efcc6"
+        })))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: health is read.
+    let health = client.sys_health().await.expect("health should parse");
+
+    // Then: the lenient parser still yields the UI model (OpenBao parity).
+    assert_eq!(
+        health,
+        HealthInfo {
+            sealed: false,
+            version: "2.0.0-HEAD".to_owned()
+        }
+    );
+}
+
+#[tokio::test]
+async fn read_token_info_when_expiry_absent_or_present_maps_token_model() {
+    // Given: a root token lookup response without an expiration.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/auth/token/lookup-self"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(200).set_body_json(token_lookup_body(None)))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: token info is read.
+    let token = client
+        .read_token_info()
+        .await
+        .expect("token lookup should parse");
+
+    // Then: root tokens without expiration are eternal.
+    assert_eq!(
+        token,
+        TokenInfo {
+            policies: vec!["root".to_owned()],
+            expire_time: None
+        }
+    );
+    assert!(token.is_eternal());
+
+    // Given: a second Vault returns an explicit token expiration.
+    let expiring_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/auth/token/lookup-self"))
+        .and(vault_header())
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(token_lookup_body(Some("2026-10-13T10:00:00Z"))),
+        )
+        .mount(&expiring_server)
+        .await;
+    let expiring_client = vault_client(&expiring_server);
+
+    // When: expiring token info is read.
+    let expiring = expiring_client
+        .read_token_info()
+        .await
+        .expect("token lookup should parse");
+
+    // Then: the expiration is preserved.
+    assert_eq!(
+        expiring.expire_time.as_deref(),
+        Some("2026-10-13T10:00:00Z")
+    );
+    assert!(!expiring.is_eternal());
+}
+
+#[tokio::test]
+async fn list_kv_secrets_when_root_and_nested_paths_maps_dirs_and_leaves() {
+    // Given: Vault KV2 LIST endpoints for root and a nested directory.
+    let server = MockServer::start().await;
+    Mock::given(method("LIST"))
+        .and(path("/v1/secret/metadata/"))
+        .and(vault_header())
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(vault_data(json!({"keys": ["team/", "creds"]}))),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("LIST"))
+        .and(path("/v1/secret/metadata/team/"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(200).set_body_json(vault_data(json!({"keys": ["db"]}))))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+    let mount = SecretPath::new("secret");
+
+    // When: root and nested KV paths are listed.
+    let root = client
+        .list_kv_secrets(&mount, &SecretPath::root())
+        .await
+        .expect("root list should parse");
+    let nested = client
+        .list_kv_secrets(&mount, &SecretPath::new("team/"))
+        .await
+        .expect("nested list should parse");
+
+    // Then: trailing slash keys become directory entries and other keys become leaves.
+    assert_eq!(
+        root,
+        vec![SecretEntry::dir("team/"), SecretEntry::leaf("creds")]
+    );
+    assert_eq!(nested, vec![SecretEntry::leaf("db")]);
+}
+
+#[tokio::test]
+async fn list_kv_secrets_when_list_verb_rejected_falls_back_to_get_list_query() {
+    // Given: a gateway that refuses the LIST verb (observed 400 over HTTP/1.1)
+    // but accepts Vault's/OpenBao's GET ?list=true spelling.
+    let server = MockServer::start().await;
+    Mock::given(method("LIST"))
+        .and(path("/v1/secret/metadata/"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(400).set_body_string("Bad Request"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/metadata/"))
+        .and(query_param("list", "true"))
+        .and(vault_header())
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(vault_data(json!({"keys": ["team/", "creds"]}))),
+        )
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: the KV root is listed.
+    let entries = client
+        .list_kv_secrets(&SecretPath::new("secret"), &SecretPath::root())
+        .await
+        .expect("fallback list should parse");
+
+    // Then: the GET ?list=true response is parsed into the same entries.
+    assert_eq!(
+        entries,
+        vec![SecretEntry::dir("team/"), SecretEntry::leaf("creds")]
+    );
+}
+
+#[tokio::test]
+async fn read_kv_secret_when_values_have_mixed_types_coerces_display_strings() {
+    // Given: a KV2 secret containing string, number, and boolean JSON values.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/data/creds"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(200).set_body_json(vault_data(json!({
+            "data": {"user": "alice", "port": 5432, "flag": true},
+            "metadata": {"version": 1, "created_time": "2026-10-13T09:00:00Z", "destroyed": false, "deletion_time": "", "custom_metadata": null}
+        }))))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: the secret is read.
+    let secret = client
+        .read_kv_secret(&SecretPath::new("secret"), &SecretPath::new("creds"))
+        .await
+        .expect("secret should parse");
+
+    // Then: string values are raw strings and non-strings are JSON text.
+    assert_eq!(
+        secret.data.get("user").expect("user key").expose_secret(),
+        "alice"
+    );
+    assert_eq!(
+        secret.data.get("port").expect("port key").expose_secret(),
+        "5432"
+    );
+    assert_eq!(
+        secret.data.get("flag").expect("flag key").expose_secret(),
+        "true"
+    );
+    assert_eq!(secret.metadata.version, 1);
+    assert_eq!(secret.metadata.created_time, "2026-10-13T09:00:00Z");
+}
+
+#[tokio::test]
+async fn read_kv_secret_when_openbao_omits_or_nulls_metadata_fields_still_parses() {
+    // Given: an OpenBao-shaped response where metadata fields are `null` or
+    // missing — Go's json decoder tolerates this; strict serde would reject it.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/data/creds"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(200).set_body_json(vault_data(json!({
+            "data": {"user": "alice"},
+            "metadata": {
+                "created_time": null,
+                "custom_metadata": null,
+                "deletion_time": null,
+                "destroyed": null,
+                "version": null
+            }
+        }))))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: the secret is read.
+    let secret = client
+        .read_kv_secret(&SecretPath::new("secret"), &SecretPath::new("creds"))
+        .await
+        .expect("secret should parse despite null metadata");
+
+    // Then: values survive and metadata falls back to safe defaults.
+    assert_eq!(
+        secret.data.get("user").expect("user key").expose_secret(),
+        "alice"
+    );
+    assert_eq!(secret.metadata.version, 0);
+    assert!(!secret.metadata.destroyed);
+    assert_eq!(secret.metadata.created_time, "");
+}
+
+#[tokio::test]
+async fn delete_kv_secret_metadata_when_called_sends_delete_and_accepts_204() {
+    // Given: Vault answers a metadata DELETE with 204 No Content.
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/v1/secret/metadata/creds"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: the secret metadata is deleted.
+    let result = client
+        .delete_kv_secret_metadata(&SecretPath::new("secret"), &SecretPath::new("creds"))
+        .await;
+
+    // Then: the empty (204) response is accepted as success.
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn capabilities_self_when_vault_responds_maps_paths_to_capability_lists() {
+    // Given: capabilities-self returns the token's caps for a KV2 data path.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/sys/capabilities-self"))
+        .and(vault_header())
+        .and(body_partial_json(
+            json!({"paths": ["secret/data/team/new"]}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(vault_data(json!({
+            "secret/data/team/new": ["create", "update", "read"]
+        }))))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: capabilities are queried.
+    let caps = client
+        .capabilities_self(&["secret/data/team/new".to_owned()])
+        .await
+        .expect("capabilities should parse");
+
+    // Then: the path maps to its capability list (used to gate write commands).
+    assert_eq!(
+        caps.get("secret/data/team/new"),
+        Some(&vec![
+            "create".to_owned(),
+            "update".to_owned(),
+            "read".to_owned()
+        ])
+    );
+}
+
+#[tokio::test]
+async fn write_kv_secret_when_called_posts_kv2_data_body_with_token() {
+    // Given: Vault expects a KV2 write at the data endpoint with a data object.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/secret/data/creds"))
+        .and(vault_header())
+        .and(body_partial_json(
+            json!({"data": {"user": "tom", "password": "p@ssw0rd"}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(vault_data(json!({
+            "version": 2,
+            "created_time": "2026-10-13T09:01:00Z",
+            "destroyed": false,
+            "deletion_time": "",
+            "custom_metadata": null
+        }))))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+    let data = BTreeMap::from([
+        ("password".to_owned(), "p@ssw0rd".to_owned()),
+        ("user".to_owned(), "tom".to_owned()),
+    ]);
+
+    // When: the secret is written.
+    let result = client
+        .write_kv_secret(&SecretPath::new("secret"), &SecretPath::new("creds"), &data)
+        .await;
+
+    // Then: vaultrs sent the expected request and the write succeeds.
+    assert_eq!(result, Ok(()));
+}
+
+#[tokio::test]
+async fn read_kv_secret_when_vault_returns_404_maps_api_error_status() {
+    // Given: Vault returns a JSON API error for a missing secret.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/data/gone"))
+        .and(vault_header())
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(json!({"errors": ["no value found"]})),
+        )
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: the missing secret is read.
+    let error = client
+        .read_kv_secret(&SecretPath::new("secret"), &SecretPath::new("gone"))
+        .await
+        .expect_err("missing secret should map to an API error");
+
+    // Then: the status is available to callers for 404 backtracking.
+    assert_eq!(error.status(), Some(404));
+    assert!(matches!(error, VaultError::Api { status: 404, .. }));
+}
+
+fn token_lookup_body(expire_time: Option<&str>) -> Value {
+    vault_data(json!({
+            "accessor": "accessor",
+            "creation_time": 1,
+            "creation_ttl": 0,
+            "display_name": "root",
+            "entity_id": "",
+            "expire_time": expire_time,
+            "explicit_max_ttl": 0,
+            "id": "token-id",
+            "identity_policies": null,
+            "issue_time": null,
+            "meta": null,
+            "num_uses": 0,
+            "orphan": true,
+            "path": "auth/token/root",
+            "policies": ["root"],
+            "renewable": null,
+            "role": null,
+            "ttl": 0
+    }))
+}
+
+fn vault_data(data: Value) -> Value {
+    json!({
+        "request_id": "request-id",
+        "lease_id": "",
+        "renewable": false,
+        "lease_duration": 0,
+        "data": data,
+        "warnings": null,
+        "wrap_info": null,
+        "auth": null
+    })
+}

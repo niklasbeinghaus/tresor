@@ -1,0 +1,18 @@
+# Reduce cognitive load thresholds.
+cognitive-complexity-threshold = 25
+type-complexity-threshold = 250
+too-many-arguments-threshold = 6
+too-many-lines-threshold = 100
+
+# msrv - keeps clippy from suggesting features past our MSRV
+msrv = "1.85"
+
+# Allow panic/unwrap/dbg/print inside tests (project discipline: never in prod code)
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+
+# Force named arguments above N params
+single-char-binding-names-threshold = 4

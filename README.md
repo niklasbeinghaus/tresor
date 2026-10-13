@@ -1,0 +1,167 @@
+# tresor
+
+[![ci](https://github.com/njoerd114/tresor/actions/workflows/ci.yml/badge.svg)](https://github.com/njoerd114/tresor/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
+
+A k9s-style terminal UI for HashiCorp Vault, rewritten in Rust.
+
+This is a from-scratch Rust reimplementation of [vaultview](https://github.com/njoerd114/vaultview)
+(the Go/tview original), built the way [sofka](https://sofka.rs) reimplements k9s:
+`ratatui` + `crossterm` + `tokio`, an async-first event loop, a single `Mode` state
+machine, and an in-memory store folded by generation-tagged messages. Currently
+supports **KV2 secret engines only** (same as the Go version).
+
+## Features
+
+- List all secret engines
+- Hierarchical secret browser with per-path caching
+- `<x>` reveal secret value (preview pane)
+- `<e>` edit secret value (inline textarea), `Ctrl+S` save
+- `<c>` copy secret value to the system clipboard
+- `Ctrl+R` hard reload of the current path (with 404 backtrack)
+- Vault header: address, sealed state, version, token policies/expiry
+- Config modal when `VAULT_ADDR`/`VAULT_TOKEN` are missing
+- Color-coded status line (errors/errors/info/success, auto-clear after 5s)
+
+## Keybindings
+
+| Key | Action |
+|---|---|
+| `Enter` | select / drill down / open secret |
+| `Esc` | back one level / cancel |
+| `↑ ↓` / `j k` | move selection |
+| `Tab` | next key (secret data view) |
+| `x` | reveal secret value |
+| `e` | edit secret value |
+| `c` | copy secret value |
+| `n` | new secret (secrets view, when permitted) |
+| `d` | delete secret — with confirmation (secrets view, when permitted) |
+| `a` | add key to the open secret (when permitted) |
+| `Ctrl+S` | save edits |
+| `Ctrl+R` | hard refresh current path |
+| `Ctrl+C` | quit |
+
+## Install / build
+
+```bash
+cargo build --release          # -> target/release/tresor
+VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=... ./target/release/tresor
+```
+
+Without env vars the app opens a configuration modal to enter address + token.
+
+## OpenBao
+
+Works with [OpenBao](https://openbao.org) (the OSS fork of Vault) out of the box.
+Config sources, in precedence order (mirroring the `bao` CLI):
+
+1. `BAO_ADDR` / `BAO_TOKEN` (a set-even-empty `BAO_*` wins over `VAULT_*`)
+2. `VAULT_ADDR` / `VAULT_TOKEN`
+3. Token file: `BAO_TOKEN_PATH` → `VAULT_TOKEN_PATH` → `~/.vault-token`
+
+So a session from `bao login -method=oidc role=...` is picked up automatically:
+
+```bash
+bao login -method=oidc role=platform-engineers   # writes ~/.vault-token
+./target/release/tresor                        # reads BAO_ADDR + ~/.vault-token
+```
+
+(`BAO_ADDR` must be exported — the CLI doesn't persist it.) The KV2 mount
+works unmodified; `sys/health` and KV2 list/read are parsed leniently because
+OpenBao response variants emit `null` (or omit) fields HashiCorp Vault sends
+as `""` (e.g. `performance_standby`, metadata `deletion_time`) — the same
+tolerance the Go version's json decoder has.
+
+### Diagnosing connection problems
+
+```bash
+./target/release/tresor --check
+```
+
+Prints a plain-text report (health, token, engines, per-engine KV2 list),
+exits non-zero on the first failure — the screenshot-free way to report a
+problem (paste the output instead of a status-line photo).
+
+Create/edit commands are **permission-aware**: the app probes
+`sys/capabilities-self` for the current path and only lists `n new secret` /
+`a add key` (and allows the actions) when your token can `create`/`update`
+there. Attempting them without permission shows a clear status error.
+
+## Theme
+
+The default palette matches **sofka.rs**'s default skin (catppuccin-mocha).
+If a sofka config is present it is reused automatically:
+
+- `~/.config/sofka/config.toml` plus sorted `conf.d/*.toml` drop-ins
+  (or `$SOFKA_CONFIG` for a different config directory)
+- `[skin] name = "..."` selects a bundled skin —
+  `catppuccin-{mocha,latte,frappe,macchiato}`, `gruvbox-dark` (aliases like
+  `mocha` accepted); unknown skins fall back to mocha with a warning
+- `[skin.colors]` per-swatch hex overrides (`red`, `teal`, `surface0`, …)
+  are applied on top
+
+A missing, empty, or unparsable config simply falls back to the bundled
+default — it never breaks startup.
+
+## Local dev Vault
+
+```bash
+scripts/dev-vault.sh           # starts `vault server -dev` (token: root) + seeds KV2 data
+scripts/dev-vault.sh stop      # stops it
+```
+
+Seed data (idempotent): `secret/apps/web/db-creds`, `secret/apps/web/api-key`,
+`secret/infra/tls`, `secret/creds`.
+
+## Tests
+
+```bash
+cargo test                     # 72 tests: unit + insta golden snapshots + wiremock vault-client integration
+cargo nextest run              # (if installed) faster runner
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo machete                  # unused-dependency check
+```
+
+The Vault client is tested at the wire level with `wiremock` (a fake Vault HTTP API),
+and every ratatui view has insta golden-frame snapshots (`TestBackend`, 100×20).
+
+## Architecture
+
+```
+src/
+├── main.rs        # tokio + crossterm event loop: EventStream + Msg channel + 1s tick, select!
+├── app.rs         # App<V: VaultApi>: Mode state machine, input dispatch, model builders, draw
+├── vault/         # VaultApi trait (native async fn), VaultClient over vaultrs (KV2)
+├── store.rs       # in-memory cache + generation-tagged Msg folding (stale-drop)
+├── state.rs       # Mode + ViewStack (breadcrumb navigation)
+├── model.rs       # boundary-parsed types (SecretEntry, KvData, TokenInfo, HealthInfo)
+├── path.rs        # SecretPath newtype (trailing-slash semantics)
+├── ui/            # pure view renderers: header, engines, secrets, secret_data, modal
+├── theme.rs       # semantic color palette
+├── clipboard.rs   # copypasta + pbcopy-wl-copy fallback
+└── event.rs       # Command enum
+```
+
+The UI never blocks on the network: vault calls run as spawned tasks that push
+generation-tagged `Msg` values over an `mpsc` channel; stale responses are dropped
+by the store (the sofka pattern).
+
+## Credits
+
+- Inspired by **k9s** (the Kubernetes TUI) and reimagined the way
+  **[sofka](https://sofka.rs)** — a Rust k8s TUI — reimagines it: `ratatui` +
+  `tokio`, async-first event loop, `Msg`-over-`mpsc` with generation tags.
+- Works with **[OpenBao](https://openbao.org)** (the open-source fork of
+  HashiCorp Vault) as well as HashiCorp Vault itself.
+- UX vocabulary follows the `vault kv` / `bao kv` CLIs.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or the
+[MIT license](LICENSE-MIT), at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this project, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.

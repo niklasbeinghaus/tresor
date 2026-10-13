@@ -1,0 +1,12 @@
+---
+source: src/ui/header.rs
+expression: "render(80, 8, |f|\ndraw_header(f, Rect::new(0, 0, 80, 8), &model, &Theme::default()))"
+---
+┌ tresor ──────────────────────────────────────────────────────────────────────┐
+│tresor 0.1.0                                                                  │
+│addr: http://127.0.0.1:8200 | sealed: false | vault: 1.18.0 | policies: root |│
+│permission denied                                                             │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

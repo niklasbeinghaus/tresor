@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+.proptest-regressions
+
+# local dev-vault runtime artifacts
+/.vault-dev.log
+/.vault-dev.pid

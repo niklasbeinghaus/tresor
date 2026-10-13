@@ -1,0 +1,16 @@
+---
+source: src/ui/header.rs
+expression: "render(100, 12, |f|\ndraw_header(f, Rect::new(0, 0, 100, 12), &model, &Theme::default()))"
+---
+┌ tresor ──────────────────────────────────────────────────────────────────────────────────────────┐
+│tresor 0.1.0                                                                                      │
+│addr: http://127.0.0.1:8200 | sealed: false | vault: 1.18.0 | policies: root | expiry: eternal    │
+│connected                                                                                         │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘

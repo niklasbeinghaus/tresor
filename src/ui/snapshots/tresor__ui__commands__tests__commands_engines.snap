@@ -1,0 +1,5 @@
+---
+source: src/ui/commands.rs
+expression: output
+---
+enter open │ esc quit │ j/k move                                                    [Secret Engines]

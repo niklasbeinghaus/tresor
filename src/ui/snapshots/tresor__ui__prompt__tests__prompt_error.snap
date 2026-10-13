@@ -1,0 +1,17 @@
+---
+source: src/ui/prompt.rs
+expression: output
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                    ┌New Key───────────────────────────────┐                    
+                    │Key name: token                       │                    
+                    │permission denied                     │                    
+                    │                                      │                    
+                    │                                      │                    
+                    │                                      │                    
+                    └──────────────────────────────────────┘

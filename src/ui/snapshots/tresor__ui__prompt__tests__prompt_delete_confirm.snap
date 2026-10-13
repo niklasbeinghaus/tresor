@@ -1,0 +1,17 @@
+---
+source: src/ui/prompt.rs
+expression: output
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                    ┌Delete Secret─────────────────────────┐                    
+                    │delete secret 'team/creds'?           │                    
+                    │enter confirm │ esc cancel            │                    
+                    │                                      │                    
+                    │                                      │                    
+                    │                                      │                    
+                    └──────────────────────────────────────┘
