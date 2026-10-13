@@ -3,7 +3,7 @@ source: src/app.rs
 expression: actual
 ---
 ┌ tresor ──────────────────────────────────────────────────────────────────────┐
-│tresor 0.2.0                                                                  │
+│tresor 0.1.0                                                                  │
 │addr: http://vault | sealed: n/a | vault: n/a | policies: n/a | expiry: n/a   │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
