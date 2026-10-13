@@ -26,6 +26,13 @@ computes the next version and the CHANGELOG from them:
 
 `ci.yml` lints commit messages and PR titles on every pull request — non-conventional commits fail CI.
 
+## Scope
+
+tresor is a browser, not an admin console. Before proposing a feature, check
+[`docs/out-of-scope.md`](docs/out-of-scope.md) — it lists the operations we deliberately
+leave to the `vault` / `bao` CLI, with the reasoning. If your idea touches one of those,
+explain in your issue or PR how it avoids the "rare / multi-mode / high-blast-radius" trap.
+
 ## Workflow
 
 1. Branch: `feat/<short-name>` or `fix/<short-name>`.
