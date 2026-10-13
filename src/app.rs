@@ -15,14 +15,10 @@ use tokio::sync::mpsc;
 use crate::clipboard::{TextClipboard, default_clipboard};
 use crate::config::Config;
 use crate::constants::{NA_VALUE, STATUS_EXPIRY_SECS, keys};
-<<<<<<< HEAD
+use crate::editor::{EditBuffer, EditOutcome, EditorError};
 use crate::model::{
     HealthInfo, KvData, MintedToken, SecretEntry, TokenCreateRequest, TokenInfo, WrappedToken,
 };
-=======
-use crate::editor::{EditBuffer, EditOutcome, EditorError};
-use crate::model::{HealthInfo, KvData, SecretEntry, TokenInfo};
->>>>>>> origin/main
 use crate::path::SecretPath;
 use crate::state::Mode;
 use crate::store::{CacheKey, Msg, Store};
@@ -36,12 +32,8 @@ use crate::ui::policies::{PoliciesModel, PolicyPreview, draw_policies};
 use crate::ui::prompt::{PromptKind, PromptModel, draw_prompt};
 use crate::ui::secret_data::{DataMode, KeyRow, SecretDataModel, draw_secret_data};
 use crate::ui::secrets::{SecretsModel, draw_secrets, sort_entries};
-<<<<<<< HEAD
 use crate::ui::token::{PaneModel, TokenViewModel, draw_token};
-use crate::vault::{VaultApi, VaultError};
-=======
 use crate::vault::{VaultApi, VaultError, encode_acl_policy_name};
->>>>>>> origin/main
 
 const TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -181,11 +173,7 @@ struct ChildTokenDraft {
 /// Running TUI application with injectable Vault API.
 #[allow(
     clippy::struct_excessive_bools,
-<<<<<<< HEAD
     reason = "capability flags are independent booleans read directly by the UI, not a state machine"
-=======
-    reason = "legacy UI state keeps explicit boolean flags for clarity and tests"
->>>>>>> origin/main
 )]
 pub struct App<V: VaultApi> {
     /// Current route state.
@@ -221,7 +209,6 @@ pub struct App<V: VaultApi> {
     pub can_delete: bool,
     /// Active input prompt, if any.
     pub prompt: Option<PromptState>,
-<<<<<<< HEAD
     /// Full token details for the token inspector (`lookup_self`).
     pub token_details: Option<TokenInfo>,
     /// Mode to return to when leaving the token inspector.
@@ -238,7 +225,6 @@ pub struct App<V: VaultApi> {
     pub token_can_wrap: bool,
     /// Whether the token capability probe has resolved (gating fails closed until then).
     token_caps_loaded: bool,
-=======
     /// Active `:` command line, if any.
     pub command_line: Option<CommandLineState>,
     /// Selected row in the policies view.
@@ -251,7 +237,6 @@ pub struct App<V: VaultApi> {
     policy_preview_error: Option<(String, String)>,
     /// Pending editor handoff request consumed by terminal owner.
     pub editor_request: Option<EditorRequest>,
->>>>>>> origin/main
     modal_addr: String,
     modal_token: String,
     modal_focus: ModalField,
@@ -344,7 +329,6 @@ impl<V: VaultApi + 'static> App<V> {
                 can_write: false,
                 can_delete: false,
                 prompt: None,
-<<<<<<< HEAD
                 token_details: None,
                 token_return: Mode::Engines,
                 token_pane: None,
@@ -353,7 +337,6 @@ impl<V: VaultApi + 'static> App<V> {
                 token_can_create: false,
                 token_can_wrap: false,
                 token_caps_loaded: false,
-=======
                 command_line: None,
                 policies_selected: 0,
                 policy_can_write: false,
@@ -362,7 +345,6 @@ impl<V: VaultApi + 'static> App<V> {
                 pending_policy_save: None,
                 policy_preview_error: None,
                 editor_request: None,
->>>>>>> origin/main
                 modal_addr: String::new(),
                 modal_token: String::new(),
                 modal_focus: ModalField::Addr,
@@ -437,13 +419,13 @@ impl<V: VaultApi + 'static> App<V> {
         if self.prompt.is_some() {
             return self.handle_prompt_input(key);
         }
-<<<<<<< HEAD
         if matches!(self.state, AppState::Main(_))
             && key.code == KeyCode::Char(':')
             && !self.inside_secret_editor()
         {
             self.open_command_prompt();
-=======
+            return false;
+        }
         if self.command_line.is_some() {
             return self.handle_command_line_input(key);
         }
@@ -455,7 +437,6 @@ impl<V: VaultApi + 'static> App<V> {
                 input: String::new(),
                 error: None,
             });
->>>>>>> origin/main
             return false;
         }
         match self.state {
@@ -517,18 +498,15 @@ impl<V: VaultApi + 'static> App<V> {
             | Msg::EnginesLoaded { .. }
             | Msg::SecretsLoaded { .. }
             | Msg::HardRefreshed { .. }
-<<<<<<< HEAD
             | Msg::TokenRenewed { .. }
             | Msg::TokenMinted { .. }
             | Msg::DataWrapped { .. }
             | Msg::DataUnwrapped { .. }
-            | Msg::TokenCapabilities { .. } => {}
-=======
+            | Msg::TokenCapabilities { .. }
             | Msg::PoliciesLoaded { .. }
             | Msg::PolicyLoaded { .. }
             | Msg::PolicyWritten { .. }
             | Msg::PolicyCapabilities { .. } => {}
->>>>>>> origin/main
         }
 
         let policy_effect = policy_effect(&msg);
@@ -2067,11 +2045,6 @@ impl<V: VaultApi + 'static> App<V> {
     fn handle_prompt_input(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => {
-<<<<<<< HEAD
-                self.prompt = None;
-                self.child_draft = None;
-                self.wrap_payload = None;
-=======
                 if self
                     .prompt
                     .as_ref()
@@ -2081,7 +2054,8 @@ impl<V: VaultApi + 'static> App<V> {
                     self.set_status(StatusKind::Info, "policy save cancelled");
                 }
                 self.prompt = None;
->>>>>>> origin/main
+                self.child_draft = None;
+                self.wrap_payload = None;
             }
             KeyCode::Enter => self.submit_prompt(),
             KeyCode::Backspace => {
@@ -2108,11 +2082,6 @@ impl<V: VaultApi + 'static> App<V> {
         let Some(mut prompt) = self.prompt.take() else {
             return;
         };
-<<<<<<< HEAD
-        let input = prompt.input.trim().to_owned();
-        if prompt.kind.requires_input() && input.is_empty() {
-            prompt.error = Some(empty_prompt_message(prompt.kind).to_owned());
-=======
         if prompt.kind == PromptKind::SavePolicy {
             let name = prompt.input.trim().to_owned();
             if name.is_empty() {
@@ -2123,15 +2092,13 @@ impl<V: VaultApi + 'static> App<V> {
             self.save_policy(&name);
             return;
         }
-        let name = prompt.input.trim().to_owned();
-        if name.is_empty() {
-            prompt.error = Some("name cannot be empty".to_owned());
->>>>>>> origin/main
+        let input = prompt.input.trim().to_owned();
+        if prompt.kind.requires_input() && input.is_empty() {
+            prompt.error = Some(empty_prompt_message(prompt.kind).to_owned());
             self.prompt = Some(prompt);
             return;
         }
         match prompt.kind {
-<<<<<<< HEAD
             PromptKind::NewSecret => self.create_secret(&input),
             PromptKind::NewKey => self.add_key(&input),
             PromptKind::DeleteSecret => self.delete_secret(&input),
@@ -2142,13 +2109,8 @@ impl<V: VaultApi + 'static> App<V> {
             PromptKind::WrapPayload => self.advance_wrap_payload(&input),
             PromptKind::WrapTtl => self.finish_wrap(&input),
             PromptKind::UnwrapToken => self.spawn_unwrap(&input),
-=======
-            PromptKind::NewSecret => self.create_secret(&name),
-            PromptKind::NewKey => self.add_key(&name),
-            PromptKind::DeleteSecret => self.delete_secret(&name),
-            PromptKind::NewPolicy => self.create_policy(&name),
-            PromptKind::SavePolicy => self.save_policy(&name),
->>>>>>> origin/main
+            PromptKind::NewPolicy => self.create_policy(&input),
+            PromptKind::SavePolicy => unreachable!("handled above"),
         }
     }
 

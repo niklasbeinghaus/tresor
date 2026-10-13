@@ -17,7 +17,6 @@ pub enum PromptKind {
     NewKey,
     /// Confirmation before deleting a secret (`input` holds the name).
     DeleteSecret,
-<<<<<<< HEAD
     /// A `:` command-palette entry.
     Command,
     /// Policies for a child token (comma/space separated).
@@ -32,12 +31,10 @@ pub enum PromptKind {
     WrapTtl,
     /// A wrapping token to unwrap (rendered masked).
     UnwrapToken,
-=======
     /// A name for a new ACL policy.
     NewPolicy,
     /// Confirmation before saving ACL policy changes.
     SavePolicy,
->>>>>>> origin/main
 }
 
 impl PromptKind {
@@ -48,7 +45,6 @@ impl PromptKind {
             Self::NewSecret => "New Secret",
             Self::NewKey => "New Key",
             Self::DeleteSecret => "Delete Secret",
-<<<<<<< HEAD
             Self::Command => "Command",
             Self::ChildTokenPolicies => "Child Token: Policies",
             Self::ChildTokenTtl => "Child Token: TTL",
@@ -56,10 +52,8 @@ impl PromptKind {
             Self::WrapPayload => "Wrap Payload",
             Self::WrapTtl => "Wrap TTL",
             Self::UnwrapToken => "Unwrap Token",
-=======
             Self::NewPolicy => "New Policy",
             Self::SavePolicy => "Save Policy",
->>>>>>> origin/main
         }
     }
 
@@ -69,8 +63,7 @@ impl PromptKind {
         match self {
             Self::NewSecret => "Secret name",
             Self::NewKey => "Key name",
-<<<<<<< HEAD
-            Self::DeleteSecret => "Confirm",
+            Self::DeleteSecret | Self::SavePolicy => "Confirm",
             Self::Command => "Command",
             Self::ChildTokenPolicies => "Policies (comma separated)",
             Self::ChildTokenTtl => "TTL (e.g. 1h)",
@@ -78,10 +71,7 @@ impl PromptKind {
             Self::WrapPayload => "Payload (JSON)",
             Self::WrapTtl => "TTL (e.g. 5m)",
             Self::UnwrapToken => "Wrapping token",
-=======
-            Self::DeleteSecret | Self::SavePolicy => "Confirm",
             Self::NewPolicy => "Policy name",
->>>>>>> origin/main
         }
     }
 
@@ -144,32 +134,37 @@ pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme
         PromptKind::DeleteSecret => Line::from(Span::styled(
             format!("delete secret '{}'?", model.input),
             Style::default().fg(theme.status_warn),
-<<<<<<< HEAD
-        ))
-    } else {
-        let shown = if model.kind.masked_input() {
-            "*".repeat(model.input.chars().count())
-        } else {
-            model.input.clone()
-        };
-        Line::from(vec![
-=======
         )),
         PromptKind::SavePolicy => Line::from(Span::styled(
             format!("save policy '{}' ?", model.input),
             Style::default().fg(theme.status_warn),
         )),
-        PromptKind::NewSecret | PromptKind::NewKey | PromptKind::NewPolicy => Line::from(vec![
->>>>>>> origin/main
-            Span::styled(
-                format!("{}: ", model.kind.label()),
-                Style::default().fg(theme.leaf_fg),
-            ),
-            Span::styled(
-                shown,
-                Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
-            ),
-        ]),
+        PromptKind::NewSecret
+        | PromptKind::NewKey
+        | PromptKind::NewPolicy
+        | PromptKind::Command
+        | PromptKind::ChildTokenPolicies
+        | PromptKind::ChildTokenTtl
+        | PromptKind::ChildTokenUses
+        | PromptKind::WrapPayload
+        | PromptKind::WrapTtl
+        | PromptKind::UnwrapToken => {
+            let shown = if model.kind.masked_input() {
+                "*".repeat(model.input.chars().count())
+            } else {
+                model.input.clone()
+            };
+            Line::from(vec![
+                Span::styled(
+                    format!("{}: ", model.kind.label()),
+                    Style::default().fg(theme.leaf_fg),
+                ),
+                Span::styled(
+                    shown,
+                    Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
+                ),
+            ])
+        }
     };
     frame.render_widget(Paragraph::new(field), *field_row);
 

@@ -9,11 +9,10 @@ use std::collections::BTreeMap;
 
 use secrecy::ExposeSecret as _;
 use serde_json::{Value, json};
-<<<<<<< HEAD
-use tresor::model::{HealthInfo, MintedToken, SecretEntry, TokenCreateRequest, WrappedToken};
-=======
-use tresor::model::{HealthInfo, PolicyDocument, PolicyEntry, SecretEntry, TokenInfo};
->>>>>>> origin/main
+use tresor::model::{
+    HealthInfo, MintedToken, PolicyDocument, PolicyEntry, SecretEntry, TokenCreateRequest,
+    TokenInfo, WrappedToken,
+};
 use tresor::path::SecretPath;
 use tresor::vault::{VaultApi as _, VaultClient, VaultError};
 use wiremock::matchers::{body_partial_json, header, method, path, query_param};

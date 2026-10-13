@@ -10,13 +10,10 @@ use std::future::Future;
 use serde_json::Value;
 
 pub use self::client::VaultClient;
-<<<<<<< HEAD
 use crate::model::{
-    HealthInfo, KvData, MintedToken, SecretEntry, TokenCreateRequest, TokenInfo, WrappedToken,
+    HealthInfo, KvData, MintedToken, PolicyDocument, PolicyEntry, SecretEntry,
+    TokenCreateRequest, TokenInfo, WrappedToken,
 };
-=======
-use crate::model::{HealthInfo, KvData, PolicyDocument, PolicyEntry, SecretEntry, TokenInfo};
->>>>>>> origin/main
 use crate::path::SecretPath;
 
 pub mod client;
@@ -128,7 +125,6 @@ pub trait VaultApi: Send + Sync {
         paths: &[String],
     ) -> impl Future<Output = Result<BTreeMap<String, Vec<String>>, VaultError>> + Send;
 
-<<<<<<< HEAD
     /// Renews the active token (`auth/token/renew-self`).
     fn renew_token_self(&self) -> impl Future<Output = Result<(), VaultError>> + Send;
 
@@ -153,7 +149,7 @@ pub trait VaultApi: Send + Sync {
         &self,
         wrapping_token: &str,
     ) -> impl Future<Output = Result<String, VaultError>> + Send;
-=======
+
     /// Lists ACL policies from `sys/policies/acl`.
     fn list_acl_policies(
         &self,
@@ -186,5 +182,4 @@ pub(crate) fn encode_acl_policy_name(name: &str) -> String {
         }
     }
     encoded
->>>>>>> origin/main
 }

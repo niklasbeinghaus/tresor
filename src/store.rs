@@ -319,18 +319,15 @@ impl Msg {
             | Self::Capabilities { generation, .. }
             | Self::SecretCreated { generation, .. }
             | Self::SecretDeleted { generation, .. }
-<<<<<<< HEAD
             | Self::TokenRenewed { generation, .. }
             | Self::TokenMinted { generation, .. }
             | Self::DataWrapped { generation, .. }
             | Self::DataUnwrapped { generation, .. }
             | Self::TokenCapabilities { generation, .. }
-=======
             | Self::PoliciesLoaded { generation, .. }
             | Self::PolicyLoaded { generation, .. }
             | Self::PolicyWritten { generation, .. }
             | Self::PolicyCapabilities { generation, .. }
->>>>>>> origin/main
             | Self::HardRefreshed { generation, .. }
             | Self::PathNotFound { generation, .. }
             | Self::Failure { generation, .. } => *generation,

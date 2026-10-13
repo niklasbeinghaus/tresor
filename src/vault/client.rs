@@ -13,12 +13,8 @@ use vaultrs::error::ClientError;
 use super::{VaultApi, VaultError, encode_acl_policy_name};
 use crate::constants::NA_VALUE;
 use crate::model::{
-<<<<<<< HEAD
-    HealthInfo, KvData, KvMetadata, MintedToken, SecretEntry, TokenCreateRequest, TokenInfo,
-    WrappedToken,
-=======
-    HealthInfo, KvData, KvMetadata, PolicyDocument, PolicyEntry, SecretEntry, TokenInfo,
->>>>>>> origin/main
+    HealthInfo, KvData, KvMetadata, MintedToken, PolicyDocument, PolicyEntry, SecretEntry,
+    TokenCreateRequest, TokenInfo, WrappedToken,
 };
 use crate::path::SecretPath;
 
@@ -369,7 +365,12 @@ impl VaultApi for VaultClient {
                 reqwest::Method::POST,
                 &token,
                 "auth/token/renew-self",
-=======
+            )
+            .await
+            .map(|_| ())
+        }
+    }
+
     fn list_acl_policies(
         &self,
     ) -> impl std::future::Future<Output = Result<Vec<PolicyEntry>, VaultError>> + Send {
@@ -454,13 +455,11 @@ impl VaultApi for VaultClient {
             Self::raw_request(
                 http.put(url).header("X-Vault-Token", token).json(&body),
                 &api_path,
->>>>>>> origin/main
             )
             .await
             .map(|_| ())
         }
     }
-<<<<<<< HEAD
 
     fn create_token(
         &self,
@@ -604,8 +603,6 @@ fn string_list(value: &Value, key: &str) -> Vec<String> {
                 .map(str::to_owned)
                 .collect()
         })
-=======
->>>>>>> origin/main
 }
 
 fn secret_entry(key: &str) -> SecretEntry {
