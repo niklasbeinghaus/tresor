@@ -16,14 +16,14 @@ src/
 ├── store.rs       # Store (engines/secrets cache) + Msg enum + generation stale-drop
 ├── state.rs       # Mode + ViewStack breadcrumb
 ├── event.rs       # Command enum (pure; dispatch lives in app.rs)
-├── model.rs       # boundary types: SecretEntry, KvData, KvMetadata, TokenInfo, HealthInfo, PolicyEntry, PolicyDocument
+├── model.rs       # boundary types: SecretEntry, KvData, KvMetadata, TokenInfo, MintedToken, WrappedToken, HealthInfo, PolicyEntry, PolicyDocument
 ├── path.rs        # SecretPath newtype — trailing-slash dir semantics (parity with Go utils)
 ├── config.rs      # Config {addr, token}; BAO_*→VAULT_* env chain + CLI token file (~/.vault-token)
 ├── clipboard.rs   # TextClipboard trait + copypasta + CommandClipboard (pbcopy/xclip/wl-copy)
 ├── editor.rs      # TextEditor trait + CommandTextEditor ($VISUAL→$EDITOR), temp-file handoff
 ├── theme.rs       # semantic palette + sofka skins (catppuccin/gruvbox); default = sofka mocha
 ├── sofka.rs       # reuses ~/.config/sofka config [skin] (name + color overrides), graceful fallback
-└── ui/            # PURE renderers: header, engines, secrets, secret_data, policies, command_line, modal, prompt (+ insta snapshots)
+└── ui/            # PURE renderers: header, engines, secrets, secret_data, token, policies, command_line, modal, prompt (+ insta snapshots)
 tests/vault_integration.rs  # wiremock wire-level tests of VaultClient
 scripts/dev-vault.sh + seed-vault.sh  # local `vault server -dev` + KV2 seed data
 ```
@@ -70,6 +70,13 @@ scripts/dev-vault.sh + seed-vault.sh  # local `vault server -dev` + KV2 seed dat
 - In `SecretData` the `x/e/c/a` lookup keys are only intercepted OUTSIDE the editor;
   inside it they are literal text (`inside_secret_editor()`), so values containing
   those letters edit correctly.
+- Token inspector (`:token` / `Mode::Token`): renders `lookup_self` details; `r` renews
+  (`auth/token/renew-self`), `n` mints a child token (`auth/token/create`), `w`/`u`
+  wrap/unwrap (`sys/wrapping/*`). Child-token and wrap actions are gated by a
+  `sys/capabilities-self` probe of `auth/token/create` / `sys/wrapping/wrap`
+  (`Msg::TokenCapabilities`); child-token specs are collected by chained prompts
+  (policies → TTL → use limit). Minted and wrapping tokens are shown ONCE in the preview
+  pane and are never cached or persisted; unwrap pretty-prints the payload.
 - Error paths: `Msg::PathNotFound` evicts the dead entry from the parent cache listing; a failed secret read while in `SecretData` backs out to `Secrets` (Go parity).
 - Tracing filter in `main.rs` defaults to `tresor=warn,off` — rustify/vaultrs log noisy errors over the `log` bridge that smear the TUI screen.
 - Theme: default = sofka's catppuccin-mocha; `sofka.rs` parses `~/.config/sofka/config.toml` + `conf.d/*.toml` (`[skin] name` + `[skin.colors]` overrides; `$SOFKA_CONFIG` supported). Bundled skins: catppuccin-{mocha,latte,frappe,macchiato}, gruvbox-dark; anything else → mocha + warn. Never fails startup.

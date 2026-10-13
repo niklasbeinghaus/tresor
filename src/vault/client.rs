@@ -13,12 +13,16 @@ use vaultrs::error::ClientError;
 use super::{VaultApi, VaultError, encode_acl_policy_name};
 use crate::constants::NA_VALUE;
 use crate::model::{
-    HealthInfo, KvData, KvMetadata, PolicyDocument, PolicyEntry, SecretEntry, TokenInfo,
+    HealthInfo, KvData, KvMetadata, MintedToken, PolicyDocument, PolicyEntry, SecretEntry,
+    TokenCreateRequest, TokenInfo, WrappedToken,
 };
 use crate::path::SecretPath;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const ERROR_DETAIL_LIMIT: usize = 200;
+/// Vault's `sys/wrapping/wrap` endpoint rejects requests without a wrap TTL, so a
+/// blank request uses this default (the same 5 minutes the `vault` CLI applies).
+const DEFAULT_WRAP_TTL: &str = "5m";
 
 /// Vault client implemented by the `vaultrs` crate, with a direct HTTP
 /// fallback for the lenient `/v1/sys/health` probe (`OpenBao` compatibility).
@@ -253,6 +257,13 @@ impl VaultApi for VaultClient {
             Ok(TokenInfo {
                 policies: response.policies,
                 expire_time: response.expire_time,
+                accessor: response.accessor,
+                display_name: response.display_name,
+                ttl: response.ttl,
+                creation_time: response.creation_time,
+                renewable: response.renewable.unwrap_or(false),
+                num_uses: response.num_uses,
+                orphan: response.orphan,
             })
         }
     }
@@ -339,6 +350,23 @@ impl VaultApi for VaultClient {
             Self::raw_json(http, &url, reqwest::Method::DELETE, &token, &api_path)
                 .await
                 .map(|_| ())
+        }
+    }
+
+    fn renew_token_self(&self) -> impl std::future::Future<Output = Result<(), VaultError>> + Send {
+        let url = format!("{}/v1/auth/token/renew-self", self.addr);
+        let token = self.token.expose_secret().to_owned();
+        let http = self.http.clone();
+        async move {
+            Self::raw_json(
+                http,
+                &url,
+                reqwest::Method::POST,
+                &token,
+                "auth/token/renew-self",
+            )
+            .await
+            .map(|_| ())
         }
     }
 
@@ -431,6 +459,149 @@ impl VaultApi for VaultClient {
             .map(|_| ())
         }
     }
+
+    fn create_token(
+        &self,
+        request: &TokenCreateRequest,
+    ) -> impl std::future::Future<Output = Result<MintedToken, VaultError>> + Send {
+        let url = format!("{}/v1/auth/token/create", self.addr);
+        let token = self.token.expose_secret().to_owned();
+        let http = self.http.clone();
+        let body = token_create_body(request);
+        async move {
+            let response =
+                Self::raw_json_post(http, &url, &token, "auth/token/create", &body).await?;
+            minted_token_from_body(&response)
+        }
+    }
+
+    fn wrap_data(
+        &self,
+        data: &Value,
+        ttl: Option<&str>,
+    ) -> impl std::future::Future<Output = Result<WrappedToken, VaultError>> + Send {
+        let url = format!("{}/v1/sys/wrapping/wrap", self.addr);
+        let token = self.token.expose_secret().to_owned();
+        let http = self.http.clone();
+        let data = data.clone();
+        let ttl = ttl.unwrap_or(DEFAULT_WRAP_TTL).to_owned();
+        async move {
+            // The wrap TTL travels as a header, not in the body, and is required.
+            let request = http
+                .post(&url)
+                .header("X-Vault-Token", &token)
+                .header("X-Vault-Wrap-TTL", ttl.as_str())
+                .json(&data);
+            let response = Self::raw_request(request, "sys/wrapping/wrap").await?;
+            wrapped_token_from_body(&response)
+        }
+    }
+
+    fn unwrap_data(
+        &self,
+        wrapping_token: &str,
+    ) -> impl std::future::Future<Output = Result<String, VaultError>> + Send {
+        let url = format!("{}/v1/sys/wrapping/unwrap", self.addr);
+        let http = self.http.clone();
+        let wrapping_token = wrapping_token.to_owned();
+        async move {
+            // The wrapping token authenticates the unwrap request itself.
+            let response = Self::raw_json(
+                http,
+                &url,
+                reqwest::Method::POST,
+                &wrapping_token,
+                "sys/wrapping/unwrap",
+            )
+            .await?;
+            serde_json::to_string_pretty(&unwrap_payload(&response))
+                .map_err(|err| VaultError::Parse(err.to_string()))
+        }
+    }
+}
+
+/// Builds the `auth/token/create` request body, omitting unset parameters so
+/// Vault applies its defaults.
+fn token_create_body(request: &TokenCreateRequest) -> Value {
+    let mut body = serde_json::Map::new();
+    if !request.policies.is_empty() {
+        body.insert("policies".to_owned(), Value::from(request.policies.clone()));
+    }
+    if let Some(ttl) = &request.ttl {
+        body.insert("ttl".to_owned(), Value::from(ttl.clone()));
+    }
+    if let Some(num_uses) = request.num_uses {
+        body.insert("num_uses".to_owned(), Value::from(num_uses));
+    }
+    Value::Object(body)
+}
+
+fn minted_token_from_body(response: &Value) -> Result<MintedToken, VaultError> {
+    let auth = response
+        .get("auth")
+        .ok_or_else(|| VaultError::Parse("create-token response had no auth block".to_owned()))?;
+    let token = auth
+        .get("client_token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| VaultError::Parse("create-token response had no client_token".to_owned()))?;
+    let mut policies = string_list(auth, "token_policies");
+    if policies.is_empty() {
+        policies = string_list(auth, "policies");
+    }
+    Ok(MintedToken {
+        token: SecretString::from(token.to_owned()),
+        accessor: string_field(auth, "accessor"),
+        policies,
+        ttl: auth.get("lease_duration").and_then(Value::as_u64),
+        renewable: auth
+            .get("renewable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn wrapped_token_from_body(response: &Value) -> Result<WrappedToken, VaultError> {
+    let info = response
+        .get("wrap_info")
+        .ok_or_else(|| VaultError::Parse("wrap response had no wrap_info".to_owned()))?;
+    let token = info
+        .get("token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| VaultError::Parse("wrap response had no token".to_owned()))?;
+    Ok(WrappedToken {
+        token: SecretString::from(token.to_owned()),
+        accessor: string_field(info, "accessor"),
+        ttl: info.get("ttl").and_then(Value::as_u64).unwrap_or(0),
+    })
+}
+
+/// Returns the unwrapped payload: the `data` block when present, else the envelope.
+fn unwrap_payload(response: &Value) -> Value {
+    response
+        .get("data")
+        .cloned()
+        .unwrap_or_else(|| response.clone())
+}
+
+fn string_field(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn string_list(value: &Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map_or_else(Vec::new, |items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
 }
 
 fn secret_entry(key: &str) -> SecretEntry {

@@ -36,6 +36,8 @@ pub mod pages {
     pub const POLICIES: &str = "policies";
     /// Secret key/value view (reveal/edit/copy/save).
     pub const SECRET_DATA: &str = "secret-data";
+    /// Token inspector view.
+    pub const TOKEN: &str = "token";
 }
 
 /// Display titles for the secret views.
