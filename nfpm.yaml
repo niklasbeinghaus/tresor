@@ -1,7 +1,7 @@
 name: tresor
-arch: ${NFPM_ARCH}
+arch: "{{ .Env.NFPM_ARCH }}"
 platform: linux
-version: ${NFPM_VERSION}
+version: "{{ .Env.NFPM_VERSION }}"
 version_schema: semver
 section: utils
 priority: optional
@@ -14,7 +14,7 @@ vendor: njoerd114
 homepage: https://github.com/njoerd114/tresor
 license: MIT OR Apache-2.0
 contents:
-  - src: ./tresor-linux-${NFPM_ARCH}
+  - src: ./tresor-linux-bin
     dst: /usr/bin/tresor
     file_info:
       mode: 0755
