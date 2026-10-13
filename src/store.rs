@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::model::{HealthInfo, KvData, SecretEntry, TokenInfo};
+use crate::model::{HealthInfo, KvData, KvVersionHistory, SecretEntry, TokenInfo};
 use crate::path::SecretPath;
 
 /// Composite key for a cached listing: mount engine plus relative KV path.
@@ -96,13 +96,21 @@ pub enum Msg {
     Capabilities {
         /// Generation stamped when the background task was spawned.
         generation: u64,
-        /// Whether the token may create/update at the probed path.
-        writable: bool,
-        /// Whether the token may delete at the probed path.
-        deletable: bool,
+        /// Whether the token may create at the probed path.
+        create: bool,
+        /// Whether the token may update at the probed path.
+        update: bool,
+        /// Whether the token may soft-delete at the probed path.
+        soft_delete: bool,
+        /// Whether the token may metadata-delete at the probed path.
+        metadata_delete: bool,
+        /// Whether the token may destroy at the probed path.
+        destroy: bool,
+        /// Whether the token may undelete at the probed path.
+        undelete: bool,
     },
-    /// A secret was deleted (metadata delete) at the cache key's path.
-    SecretDeleted {
+    /// A secret was metadata-deleted at the cache key's path.
+    SecretMetadataDeleted {
         /// Generation stamped when the background task was spawned.
         generation: u64,
         /// Cache key of the deleted secret.
@@ -114,6 +122,62 @@ pub enum Msg {
         generation: u64,
         /// Cache key of the created secret.
         key: CacheKey,
+    },
+    /// KV2 version history metadata was loaded.
+    VersionsLoaded {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Cache key of the secret path.
+        key: CacheKey,
+        /// Loaded version history.
+        history: KvVersionHistory,
+    },
+    /// One specific KV2 version payload was loaded.
+    SecretVersionLoaded {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Cache key of the secret path.
+        key: CacheKey,
+        /// Version number loaded.
+        version: u64,
+        /// Loaded KV data for this version.
+        data: KvData,
+    },
+    /// The selected secret version was soft-deleted.
+    SecretVersionDeleted {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Cache key of the secret path.
+        key: CacheKey,
+        /// Version number soft-deleted.
+        version: u64,
+    },
+    /// The selected secret version was undeleted.
+    SecretVersionUndeleted {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Cache key of the secret path.
+        key: CacheKey,
+        /// Version number undeleted.
+        version: u64,
+    },
+    /// The selected secret version was destroyed.
+    SecretVersionDestroyed {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Cache key of the secret path.
+        key: CacheKey,
+        /// Version number destroyed.
+        version: u64,
+    },
+    /// The selected secret version was restored as the latest.
+    SecretVersionRestored {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Cache key of the secret path.
+        key: CacheKey,
+        /// Source version that was restored.
+        source_version: u64,
     },
 }
 
@@ -161,7 +225,13 @@ impl Store {
             | Msg::SecretWritten { .. }
             | Msg::Capabilities { .. }
             | Msg::SecretCreated { .. }
-            | Msg::SecretDeleted { .. } => true,
+            | Msg::SecretMetadataDeleted { .. }
+            | Msg::VersionsLoaded { .. }
+            | Msg::SecretVersionLoaded { .. }
+            | Msg::SecretVersionDeleted { .. }
+            | Msg::SecretVersionUndeleted { .. }
+            | Msg::SecretVersionDestroyed { .. }
+            | Msg::SecretVersionRestored { .. } => true,
             Msg::HardRefreshed { key, .. } => {
                 self.secrets.remove(&key);
                 true
@@ -208,7 +278,7 @@ impl Store {
 }
 
 impl Msg {
-    const fn generation(&self) -> u64 {
+    pub(crate) const fn generation(&self) -> u64 {
         match self {
             Self::EnginesLoaded { generation, .. }
             | Self::SecretsLoaded { generation, .. }
@@ -218,7 +288,13 @@ impl Msg {
             | Self::SecretWritten { generation, .. }
             | Self::Capabilities { generation, .. }
             | Self::SecretCreated { generation, .. }
-            | Self::SecretDeleted { generation, .. }
+            | Self::SecretMetadataDeleted { generation, .. }
+            | Self::VersionsLoaded { generation, .. }
+            | Self::SecretVersionLoaded { generation, .. }
+            | Self::SecretVersionDeleted { generation, .. }
+            | Self::SecretVersionUndeleted { generation, .. }
+            | Self::SecretVersionDestroyed { generation, .. }
+            | Self::SecretVersionRestored { generation, .. }
             | Self::HardRefreshed { generation, .. }
             | Self::PathNotFound { generation, .. }
             | Self::Failure { generation, .. } => *generation,
@@ -231,7 +307,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::{CacheKey, Msg, Store};
-    use crate::model::SecretEntry;
+    use crate::model::{KvData, KvMetadata, KvVersionHistory, SecretEntry};
     use crate::path::SecretPath;
 
     fn key(path: &str) -> CacheKey {
@@ -369,6 +445,96 @@ mod tests {
         assert!(!store.apply(Msg::Failure {
             generation,
             message: "denied".to_owned(),
+        }));
+    }
+
+    #[test]
+    fn generation_accessor_exposes_message_stamp() {
+        let generation = 42;
+        let msg = Msg::Failure {
+            generation,
+            message: String::new(),
+        };
+
+        assert_eq!(msg.generation(), generation);
+    }
+
+    #[test]
+    fn apply_accepts_version_operation_messages_for_current_generation() {
+        let mut store = Store::new();
+        let generation = store.bump_generation();
+        let cache_key = key("team/api");
+
+        assert!(store.apply(Msg::VersionsLoaded {
+            generation,
+            key: cache_key.clone(),
+            history: KvVersionHistory {
+                current_version: 3,
+                versions: Vec::new(),
+            },
+        }));
+        assert!(store.apply(Msg::SecretVersionLoaded {
+            generation,
+            key: cache_key.clone(),
+            version: 3,
+            data: KvData {
+                data: std::collections::BTreeMap::new(),
+                metadata: KvMetadata {
+                    version: 3,
+                    destroyed: false,
+                    created_time: String::new(),
+                    deletion_time: None,
+                },
+            },
+        }));
+        assert!(store.apply(Msg::SecretVersionDeleted {
+            generation,
+            key: cache_key.clone(),
+            version: 3,
+        }));
+        assert!(store.apply(Msg::SecretVersionUndeleted {
+            generation,
+            key: cache_key.clone(),
+            version: 3,
+        }));
+        assert!(store.apply(Msg::SecretVersionDestroyed {
+            generation,
+            key: cache_key.clone(),
+            version: 3,
+        }));
+        assert!(store.apply(Msg::SecretVersionRestored {
+            generation,
+            key: cache_key,
+            source_version: 2,
+        }));
+    }
+
+    #[test]
+    fn apply_drops_stale_version_operation_messages() {
+        let mut store = Store::new();
+        let generation = store.bump_generation();
+        let stale_generation = generation.saturating_sub(1);
+        let cache_key = key("team/api");
+
+        assert!(!store.apply(Msg::SecretVersionDeleted {
+            generation: stale_generation,
+            key: cache_key.clone(),
+            version: 9,
+        }));
+        assert!(!store.apply(Msg::SecretVersionUndeleted {
+            generation: stale_generation,
+            key: cache_key.clone(),
+            version: 9,
+        }));
+        assert!(!store.apply(Msg::SecretVersionDestroyed {
+            generation: stale_generation,
+            key: cache_key.clone(),
+            version: 9,
+        }));
+        assert!(!store.apply(Msg::SecretVersionRestored {
+            generation: stale_generation,
+            key: cache_key,
+            source_version: 8,
         }));
     }
 
