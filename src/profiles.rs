@@ -29,7 +29,7 @@ pub struct Profile {
 /// All configured profiles plus the optional default profile name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Profiles {
-    /// Profiles sorted alphabetically by name (parsed from a BTreeMap).
+    /// Profiles sorted alphabetically by name (parsed from a `BTreeMap`).
     pub profiles: Vec<Profile>,
     /// Optional `current` profile name to connect with at startup.
     pub current: Option<String>,
@@ -54,7 +54,7 @@ impl Profiles {
         self.profiles.is_empty()
     }
 
-    /// Every profile name in config order.
+    /// Every profile name in alphabetical order.
     #[must_use]
     pub fn names(&self) -> Vec<&str> {
         self.profiles

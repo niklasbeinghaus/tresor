@@ -11,7 +11,7 @@ use secrecy::ExposeSecret as _;
 use serde_json::{Value, json};
 use tresor::model::{
     HealthInfo, MintedToken, PolicyDocument, PolicyEntry, SecretEntry, TokenCreateRequest,
-    TokenInfo, WrappedToken,
+    WrappedToken,
 };
 use tresor::path::SecretPath;
 use tresor::vault::{VaultApi as _, VaultClient, VaultError};

@@ -812,8 +812,8 @@ impl<V: VaultApi + 'static> App<V> {
                     ui.selected = 0;
                 }
             }
-            AppState::ConfigInput
-            | AppState::Main(Mode::Config | Mode::Policies | Mode::Token) => {}
+            AppState::ConfigInput | AppState::Main(Mode::Config | Mode::Policies | Mode::Token) => {
+            }
         }
     }
 
@@ -2659,7 +2659,7 @@ impl<V: VaultApi + 'static> App<V> {
             PromptKind::WrapTtl => self.finish_wrap(&input),
             PromptKind::UnwrapToken => self.spawn_unwrap(&input),
             PromptKind::NewPolicy => self.create_policy(&input),
-            PromptKind::SavePolicy => unreachable!("handled above"),
+            PromptKind::SavePolicy => {}
         }
     }
 
