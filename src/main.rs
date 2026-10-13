@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
     // vaultrs, hyper, rustls) log noisy errors over the `log` bridge that would
     // smear into the alternate screen. RUST_LOG overrides.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("tresor=debug,off"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("tresor=warn,off"));
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(filter)

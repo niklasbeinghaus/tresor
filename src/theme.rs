@@ -295,7 +295,7 @@ impl Theme {
     #[must_use]
     pub fn load_sofka_or_default() -> Self {
         crate::sofka::load_theme().unwrap_or_else(|| {
-            tracing::warn!("no usable sofka theme — using default");
+            tracing::debug!("no sofka theme found; using the bundled default");
             Self::default()
         })
     }
