@@ -342,6 +342,222 @@ async fn read_kv_secret_when_openbao_omits_or_nulls_metadata_fields_still_parses
     assert_eq!(secret.metadata.version, 0);
     assert!(!secret.metadata.destroyed);
     assert_eq!(secret.metadata.created_time, "");
+    assert_eq!(secret.metadata.deletion_time, None);
+}
+
+#[tokio::test]
+async fn read_kv_metadata_when_versions_object_has_string_keys_sorts_desc_and_marks_current() {
+    // Given: KV2 metadata returns versions as string-keyed object entries.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/metadata/creds"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(200).set_body_json(vault_data(json!({
+            "current_version": 2,
+            "versions": {
+                "1": {
+                    "created_time": "2026-10-13T08:00:00Z",
+                    "deletion_time": "",
+                    "destroyed": false
+                },
+                "2": {
+                    "created_time": "2026-10-13T09:00:00Z",
+                    "deletion_time": "",
+                    "destroyed": false
+                },
+                "abc": {
+                    "created_time": "ignored",
+                    "deletion_time": "",
+                    "destroyed": true
+                }
+            }
+        }))))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: metadata is read.
+    let history = client
+        .read_kv_metadata(&SecretPath::new("secret"), &SecretPath::new("creds"))
+        .await
+        .expect("metadata should parse");
+
+    // Then: versions are sorted descending, current marked, and non-u64 keys skipped.
+    assert_eq!(history.current_version, 2);
+    assert_eq!(history.versions.len(), 2);
+    let first = history.versions.first().expect("first version");
+    let second = history.versions.get(1).expect("second version");
+    assert_eq!(first.version, 2);
+    assert!(first.is_current);
+    assert_eq!(second.version, 1);
+    assert!(!second.is_current);
+}
+
+#[tokio::test]
+async fn read_kv_metadata_when_openbao_nulls_deletion_time_maps_none() {
+    // Given: metadata version entries carry null deletion_time.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/metadata/creds"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(200).set_body_json(vault_data(json!({
+            "current_version": 1,
+            "versions": {
+                "1": {
+                    "created_time": "2026-10-13T09:00:00Z",
+                    "deletion_time": null,
+                    "destroyed": false
+                }
+            }
+        }))))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: metadata is read.
+    let history = client
+        .read_kv_metadata(&SecretPath::new("secret"), &SecretPath::new("creds"))
+        .await
+        .expect("metadata should parse");
+
+    // Then: deletion time maps to None.
+    assert_eq!(history.versions.len(), 1);
+    let single = history.versions.first().expect("single version");
+    assert_eq!(single.deletion_time, None);
+}
+
+#[tokio::test]
+async fn read_kv_version_when_called_sends_version_query_and_parses_data() {
+    // Given: KV2 read for a specific version and token header.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/data/creds"))
+        .and(query_param("version", "3"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(200).set_body_json(vault_data(json!({
+            "data": {"user": "alice"},
+            "metadata": {
+                "version": 3,
+                "created_time": "2026-10-13T10:00:00Z",
+                "deletion_time": "",
+                "destroyed": false
+            }
+        }))))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: version 3 is read.
+    let secret = client
+        .read_kv_version(&SecretPath::new("secret"), &SecretPath::new("creds"), 3)
+        .await
+        .expect("versioned read should parse");
+
+    // Then: query parameter and payload are mapped into KvData.
+    assert_eq!(
+        secret.data.get("user").expect("user key").expose_secret(),
+        "alice"
+    );
+    assert_eq!(secret.metadata.version, 3);
+}
+
+#[tokio::test]
+async fn delete_kv_secret_version_when_called_posts_versions_body() {
+    // Given: KV2 delete endpoint accepts version array via POST.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/secret/delete/creds"))
+        .and(vault_header())
+        .and(body_partial_json(json!({"versions": [3]})))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: version 3 is soft-deleted.
+    let result = client
+        .delete_kv_secret_version(&SecretPath::new("secret"), &SecretPath::new("creds"), 3)
+        .await;
+
+    // Then: request shape matches KV2 contract and succeeds on empty body.
+    assert_eq!(result, Ok(()));
+}
+
+#[tokio::test]
+async fn undelete_kv_secret_version_when_called_posts_versions_body() {
+    // Given: KV2 undelete endpoint accepts version array via POST.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/secret/undelete/creds"))
+        .and(vault_header())
+        .and(body_partial_json(json!({"versions": [3]})))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: version 3 is undeleted.
+    let result = client
+        .undelete_kv_secret_version(&SecretPath::new("secret"), &SecretPath::new("creds"), 3)
+        .await;
+
+    // Then: request shape matches KV2 contract and succeeds on empty body.
+    assert_eq!(result, Ok(()));
+}
+
+#[tokio::test]
+async fn destroy_kv_secret_version_when_called_puts_versions_body() {
+    // Given: KV2 destroy endpoint accepts version array via PUT.
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/v1/secret/destroy/creds"))
+        .and(vault_header())
+        .and(body_partial_json(json!({"versions": [3]})))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: version 3 is destroyed.
+    let result = client
+        .destroy_kv_secret_version(&SecretPath::new("secret"), &SecretPath::new("creds"), 3)
+        .await;
+
+    // Then: request shape matches KV2 contract and succeeds on empty body.
+    assert_eq!(result, Ok(()));
+}
+
+#[tokio::test]
+async fn read_kv_secret_when_metadata_has_deletion_time_preserves_it() {
+    // Given: KV2 metadata carries a non-empty deletion timestamp.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/data/creds"))
+        .and(vault_header())
+        .respond_with(ResponseTemplate::new(200).set_body_json(vault_data(json!({
+            "data": {"user": "alice"},
+            "metadata": {
+                "version": 1,
+                "created_time": "2026-10-13T09:00:00Z",
+                "deletion_time": "2026-10-14T09:00:00Z",
+                "destroyed": false
+            }
+        }))))
+        .mount(&server)
+        .await;
+    let client = vault_client(&server);
+
+    // When: secret metadata is read.
+    let secret = client
+        .read_kv_secret(&SecretPath::new("secret"), &SecretPath::new("creds"))
+        .await
+        .expect("secret should parse");
+
+    // Then: deletion_time is preserved as Some(timestamp).
+    assert_eq!(
+        secret.metadata.deletion_time.as_deref(),
+        Some("2026-10-14T09:00:00Z")
+    );
 }
 
 #[tokio::test]
