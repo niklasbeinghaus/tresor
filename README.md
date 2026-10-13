@@ -24,6 +24,13 @@ supports **KV2 secret engines only** (same as the Go version).
 - Config modal when `VAULT_ADDR`/`VAULT_TOKEN` are missing
 - Color-coded status line (errors/errors/info/success, auto-clear after 5s)
 
+### Scope
+
+tresor is deliberately a **browser, not an admin console**. The operations it leaves to the
+`vault` / `bao` CLI (PKI issuance, dynamic-secret leases, HA/seal/unseal, policy & auth
+configuration, bulk destructive operations, in-TUI full-screen editors, secret sync) are
+tracked with their reasoning in [`docs/out-of-scope.md`](docs/out-of-scope.md).
+
 ## Keybindings
 
 | Key | Action |
