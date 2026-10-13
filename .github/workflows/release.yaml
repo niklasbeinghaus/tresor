@@ -1,14 +1,25 @@
 name: release
 
+# Tag-driven builds for manually created tags. Note: tags created by release-please
+# with the default GITHUB_TOKEN do NOT trigger this workflow (anti-recursion) — the
+# automatic path builds inside release-please.yml. Use workflow_dispatch here to
+# (re-)attach binaries to any existing tag.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach binaries for (e.g. v0.2.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -26,6 +37,8 @@ jobs:
           - { runner: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -70,6 +83,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -85,7 +100,7 @@ jobs:
       - name: Build packages
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           mkdir -p dist
           declare -A ARCH=( [amd64]="x86_64-unknown-linux-gnu" [arm64]="aarch64-unknown-linux-gnu" )
           for arch in "${!ARCH[@]}"; do

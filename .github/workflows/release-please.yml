@@ -1,8 +1,12 @@
 name: release-please
 
-# Conventional commits -> release PR (version bump + CHANGELOG) -> merge -> tag + GitHub Release.
-# Tag-driven on purpose: tresor ships binaries via GitHub Releases and is not
-# published to crates.io, so no registry baseline is needed.
+# Conventional commits -> release PR (version bump + CHANGELOG) -> merge -> tag + GitHub Release,
+# then the same run builds and attaches the binaries.
+#
+# Why the build lives here and not only in release.yaml: releases created with the
+# default GITHUB_TOKEN do not trigger further workflows (GitHub anti-recursion), so a
+# tag created by release-please would never start a separate tag-driven workflow.
+# release.yaml still exists for workflow_dispatch re-attachments.
 on:
   push:
     branches: [main]
@@ -11,11 +15,118 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  release-please:
+  release:
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  build:
+    needs: release
+    if: ${{ needs.release.outputs.release_created == 'true' }}
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          # macOS 13 (Intel) runners are retired — cross-compile x86_64 from the arm64 runner.
+          - { runner: macos-latest, target: x86_64-apple-darwin }
+          - { runner: macos-latest, target: aarch64-apple-darwin }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag_name }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: ${{ !contains(matrix.target, 'windows') }}
+        run: |
+          set -euo pipefail
+          cp "target/${{ matrix.target }}/release/tresor" "tresor-${{ matrix.target }}"
+          tar czf "tresor-${{ matrix.target }}.tar.gz" "tresor-${{ matrix.target }}"
+
+      - name: Package (windows)
+        if: ${{ contains(matrix.target, 'windows') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "target/${{ matrix.target }}/release/tresor.exe" "tresor-${{ matrix.target }}.exe"
+          7z a "tresor-${{ matrix.target }}.zip" "tresor-${{ matrix.target }}.exe"
+
+      - name: Upload linux binary for packaging
+        if: ${{ contains(matrix.target, 'linux') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.target }}
+          path: tresor-${{ matrix.target }}
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release.outputs.tag_name }}
+          files: |
+            tresor-*.tar.gz
+            tresor-*.zip
+
+  packages:
+    needs: [release, build]
+    if: ${{ needs.release.outputs.release_created == 'true' }}
+    name: packages (deb/rpm/apk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag_name }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: linux-*
+
+      - name: Install nfpm
+        run: |
+          set -euo pipefail
+          curl -sfL https://github.com/goreleaser/nfpm/releases/latest/download/nfpm_amd64.tar.gz \
+            | tar -xz -C /usr/local/bin nfpm
+
+      - name: Build packages
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.release.outputs.version }}"
+          mkdir -p dist
+          declare -A ARCH=( [amd64]="x86_64-unknown-linux-gnu" [arm64]="aarch64-unknown-linux-gnu" )
+          for arch in "${!ARCH[@]}"; do
+            target="${ARCH[$arch]}"
+            cp "artifacts/linux-${target}/tresor-${target}" "./tresor-linux-bin"
+            for packager in deb rpm apk; do
+              NFPM_ARCH="$arch" NFPM_VERSION="$VERSION" \
+                nfpm package --packager "$packager" --config nfpm.yaml \
+                --target "dist/tresor_${VERSION}_linux_${arch}.${packager}"
+            done
+          done
+          ls -l dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release.outputs.tag_name }}
+          files: dist/*
