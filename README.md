@@ -19,6 +19,9 @@ supports **KV2 secret engines only** (same as the Go version).
 - `<x>` reveal secret value (preview pane)
 - `<e>` edit secret value (inline textarea), `Ctrl+S` save
 - `<c>` copy secret value to the system clipboard
+- `<v>` open version history from secret-data view
+- Version pane actions: `Enter` preview, `r` restore, `u` undelete, `X` destroy (typed confirmation)
+- Secret-data action: `d` soft-delete latest version
 - `Ctrl+R` hard reload of the current path (with 404 backtrack)
 - Vault header: address, sealed state, version, token policies/expiry
 - Config modal when `VAULT_ADDR`/`VAULT_TOKEN` are missing
@@ -42,8 +45,14 @@ tracked with their reasoning in [`docs/out-of-scope.md`](docs/out-of-scope.md).
 | `x` | reveal secret value |
 | `e` | edit secret value |
 | `c` | copy secret value |
+| `v` | open versions (secret-data view) |
 | `n` | new secret (secrets view, when permitted) |
-| `d` | delete secret — with confirmation (secrets view, when permitted) |
+| `D` | metadata-delete secret — with confirmation (secrets view, when permitted) |
+| `d` | soft-delete latest secret version (secret-data view, when permitted) |
+| `Enter` | preview selected version (versions view) |
+| `r` | restore selected version as latest (versions view, when permitted) |
+| `u` | undelete selected soft-deleted version (versions view, when permitted) |
+| `X` | destroy selected version — typed confirmation (versions view, when permitted) |
 | `a` | add key to the open secret (when permitted) |
 | `Ctrl+S` | save edits |
 | `Ctrl+R` | hard refresh current path |
