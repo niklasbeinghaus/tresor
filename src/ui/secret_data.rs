@@ -5,7 +5,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
-use tui_textarea::TextArea;
+use ratatui_textarea::TextArea;
 
 use crate::constants::MASK;
 use crate::theme::Theme;
