@@ -441,6 +441,7 @@ impl<V: VaultApi + 'static> App<V> {
             return self.handle_filter_input(key);
         }
         if key.code == KeyCode::Esc
+            && !self.inside_secret_editor()
             && self
                 .filter
                 .as_ref()
