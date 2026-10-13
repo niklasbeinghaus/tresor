@@ -11,8 +11,8 @@ use serde_json::Value;
 
 pub use self::client::VaultClient;
 use crate::model::{
-    HealthInfo, KvData, MintedToken, PolicyDocument, PolicyEntry, SecretEntry,
-    TokenCreateRequest, TokenInfo, WrappedToken,
+    HealthInfo, KvData, MintedToken, PolicyDocument, PolicyEntry, SecretEntry, TokenCreateRequest,
+    TokenInfo, WrappedToken,
 };
 use crate::path::SecretPath;
 

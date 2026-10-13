@@ -419,15 +419,15 @@ impl<V: VaultApi + 'static> App<V> {
         if self.prompt.is_some() {
             return self.handle_prompt_input(key);
         }
+        if self.command_line.is_some() {
+            return self.handle_command_line_input(key);
+        }
         if matches!(self.state, AppState::Main(_))
             && key.code == KeyCode::Char(':')
             && !self.inside_secret_editor()
         {
             self.open_command_prompt();
             return false;
-        }
-        if self.command_line.is_some() {
-            return self.handle_command_line_input(key);
         }
         if key.code == KeyCode::Char(keys::COMMAND)
             && matches!(self.state, AppState::Main(_))
@@ -1279,6 +1279,12 @@ impl<V: VaultApi + 'static> App<V> {
             input: String::new(),
             error: None,
         });
+        self.prompt = Some(PromptState {
+            kind: PromptKind::Command,
+            input: String::new(),
+            error: None,
+            detail: None,
+        });
     }
 
     fn open_child_token_prompt(&mut self) {
@@ -1312,10 +1318,17 @@ impl<V: VaultApi + 'static> App<V> {
     }
 
     fn reopen_prompt(&mut self, kind: PromptKind, error: impl Into<String>) {
+        let message = error.into();
+        if kind == PromptKind::Command {
+            self.command_line = Some(CommandLineState {
+                input: String::new(),
+                error: Some(message.clone()),
+            });
+        }
         self.prompt = Some(PromptState {
             kind,
             input: String::new(),
-            error: Some(error.into()),
+            error: Some(message),
             detail: None,
         });
     }
@@ -1323,6 +1336,11 @@ impl<V: VaultApi + 'static> App<V> {
     fn run_command(&mut self, input: &str) {
         let command = input.split_whitespace().next().unwrap_or_default();
         match command {
+            "policies" => {
+                self.prompt = None;
+                self.command_line = None;
+                self.open_policies();
+            }
             "token" | "t" => self.open_token_view(),
             "unwrap" | "u" => {
                 self.open_token_view();
@@ -1334,7 +1352,7 @@ impl<V: VaultApi + 'static> App<V> {
             }
             other => {
                 let message = if other.is_empty() {
-                    "enter a command: token, unwrap, wrap".to_owned()
+                    "enter a command: token, unwrap, wrap, policies".to_owned()
                 } else {
                     format!("unknown command: {other}")
                 };
@@ -2055,6 +2073,7 @@ impl<V: VaultApi + 'static> App<V> {
                     self.set_status(StatusKind::Info, "policy save cancelled");
                 }
                 self.prompt = None;
+                self.command_line = None;
                 self.child_draft = None;
                 self.wrap_payload = None;
             }
@@ -2062,6 +2081,11 @@ impl<V: VaultApi + 'static> App<V> {
             KeyCode::Backspace => {
                 if let Some(prompt) = self.prompt.as_mut() {
                     prompt.input.pop();
+                    if prompt.kind == PromptKind::Command {
+                        if let Some(command_line) = self.command_line.as_mut() {
+                            command_line.input.pop();
+                        }
+                    }
                 }
             }
             KeyCode::Char(ch) => {
@@ -2071,6 +2095,11 @@ impl<V: VaultApi + 'static> App<V> {
                         PromptKind::DeleteSecret | PromptKind::SavePolicy
                     ) {
                         prompt.input.push(ch);
+                        if prompt.kind == PromptKind::Command {
+                            if let Some(command_line) = self.command_line.as_mut() {
+                                command_line.input.push(ch);
+                            }
+                        }
                     }
                 }
             }
@@ -2100,10 +2129,16 @@ impl<V: VaultApi + 'static> App<V> {
             return;
         }
         match prompt.kind {
+            PromptKind::Command => {
+                self.command_line = Some(CommandLineState {
+                    input: input.clone(),
+                    error: None,
+                });
+                self.run_command(&input);
+            }
             PromptKind::NewSecret => self.create_secret(&input),
             PromptKind::NewKey => self.add_key(&input),
             PromptKind::DeleteSecret => self.delete_secret(&input),
-            PromptKind::Command => self.run_command(&input),
             PromptKind::ChildTokenPolicies => self.advance_child_policies(&input),
             PromptKind::ChildTokenTtl => self.advance_child_ttl(&input),
             PromptKind::ChildTokenUses => self.finish_child_token(&input),
@@ -2250,12 +2285,13 @@ impl<V: VaultApi + 'static> App<V> {
     }
 
     fn submit_command_line(&mut self) {
-        let Some(state) = self.command_line.as_ref() else {
+        let Some(input) = self.command_line.as_ref().map(|state| state.input.clone()) else {
             return;
         };
-        let other = state.input.trim().to_owned();
+        let other = input.trim().to_owned();
         if other.is_empty() {
             self.command_line = None;
+            self.prompt = None;
             return;
         }
         if other == "policies" {
@@ -2263,8 +2299,14 @@ impl<V: VaultApi + 'static> App<V> {
             return;
         }
         self.command_line = Some(CommandLineState {
-            input: state.input.clone(),
+            input: input.clone(),
             error: Some(format!("unknown command: {other}")),
+        });
+        self.prompt = Some(PromptState {
+            kind: PromptKind::Command,
+            input,
+            error: Some(format!("unknown command: {other}")),
+            detail: None,
         });
     }
 
