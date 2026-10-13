@@ -323,14 +323,14 @@ fn command_failure_message(code: Option<i32>, stderr: &[u8]) -> String {
 #[cfg(unix)]
 fn run_shell(command: &str) -> tokio::process::Command {
     let mut shell = tokio::process::Command::new("sh");
-    shell.arg("-c").arg(command);
+    shell.arg("-c").arg(command).kill_on_drop(true);
     shell
 }
 
 #[cfg(windows)]
 fn run_shell(command: &str) -> tokio::process::Command {
     let mut shell = tokio::process::Command::new("cmd");
-    shell.arg("/C").arg(command);
+    shell.arg("/C").arg(command).kill_on_drop(true);
     shell
 }
 
