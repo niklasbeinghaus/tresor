@@ -4,14 +4,17 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
+use base64::Engine as _;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::Value;
 use vaultrs::client::{VaultClient as InnerVaultClient, VaultClientSettingsBuilder};
 use vaultrs::error::ClientError;
 
-use super::{VaultApi, VaultError};
+use super::{VaultApi, VaultError, encode_acl_policy_name};
 use crate::constants::NA_VALUE;
-use crate::model::{HealthInfo, KvData, KvMetadata, SecretEntry, TokenInfo};
+use crate::model::{
+    HealthInfo, KvData, KvMetadata, PolicyDocument, PolicyEntry, SecretEntry, TokenInfo,
+};
 use crate::path::SecretPath;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -338,6 +341,96 @@ impl VaultApi for VaultClient {
                 .map(|_| ())
         }
     }
+
+    fn list_acl_policies(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<PolicyEntry>, VaultError>> + Send {
+        let url = format!("{}/v1/sys/policies/acl", self.addr);
+        let api_path = "sys/policies/acl".to_owned();
+        let http = self.http.clone();
+        let token = self.token.expose_secret().to_owned();
+        async move {
+            let method = reqwest::Method::from_bytes(b"LIST")
+                .map_err(|err| VaultError::Connection(err.to_string()))?;
+            let body = match Self::raw_json(http.clone(), &url, method, &token, &api_path).await {
+                Ok(body) => body,
+                Err(VaultError::Api {
+                    status: 400 | 403 | 405,
+                    ..
+                }) => {
+                    let fallback_url = format!("{url}?list=true");
+                    Self::raw_json(http, &fallback_url, reqwest::Method::GET, &token, &api_path)
+                        .await?
+                }
+                Err(err) => return Err(err),
+            };
+            let mut entries: Vec<PolicyEntry> = body
+                .get("data")
+                .and_then(|data| data.get("keys"))
+                .and_then(Value::as_array)
+                .map_or_else(Vec::new, |keys| {
+                    keys.iter()
+                        .filter_map(Value::as_str)
+                        .map(|name| PolicyEntry {
+                            name: name.to_owned(),
+                        })
+                        .collect()
+                });
+            entries.sort_by(|left, right| left.name.cmp(&right.name));
+            Ok(entries)
+        }
+    }
+
+    fn read_acl_policy(
+        &self,
+        name: &str,
+    ) -> impl std::future::Future<Output = Result<PolicyDocument, VaultError>> + Send {
+        let encoded_name = encode_acl_policy_name(name);
+        let url = format!("{}/v1/sys/policies/acl/{encoded_name}", self.addr);
+        let api_path = format!("sys/policies/acl/{encoded_name}");
+        let requested_name = name.to_owned();
+        let http = self.http.clone();
+        let token = self.token.expose_secret().to_owned();
+        async move {
+            let body = Self::raw_json(http, &url, reqwest::Method::GET, &token, &api_path).await?;
+            let data = body
+                .get("data")
+                .ok_or_else(|| VaultError::Parse("policy response had no data".to_owned()))?;
+            let resolved_name = data
+                .get("name")
+                .and_then(Value::as_str)
+                .map_or_else(|| requested_name.clone(), str::to_owned);
+            let raw_policy = data
+                .get("policy")
+                .and_then(Value::as_str)
+                .ok_or_else(|| VaultError::Parse("policy response had no policy".to_owned()))?;
+            Ok(PolicyDocument {
+                name: resolved_name,
+                policy: decode_acl_policy_body(raw_policy)?,
+            })
+        }
+    }
+
+    fn write_acl_policy(
+        &self,
+        name: &str,
+        policy: &str,
+    ) -> impl std::future::Future<Output = Result<(), VaultError>> + Send {
+        let encoded_name = encode_acl_policy_name(name);
+        let url = format!("{}/v1/sys/policies/acl/{encoded_name}", self.addr);
+        let api_path = format!("sys/policies/acl/{encoded_name}");
+        let body = serde_json::json!({"policy": policy});
+        let token = self.token.expose_secret().to_owned();
+        let http = self.http.clone();
+        async move {
+            Self::raw_request(
+                http.put(url).header("X-Vault-Token", token).json(&body),
+                &api_path,
+            )
+            .await
+            .map(|_| ())
+        }
+    }
 }
 
 fn secret_entry(key: &str) -> SecretEntry {
@@ -441,4 +534,33 @@ fn error_detail_from_body(body: &Value) -> String {
         .and_then(|errors| errors.first())
         .and_then(Value::as_str)
         .map_or_else(String::new, truncate_detail)
+}
+
+fn decode_acl_policy_body(policy: &str) -> Result<String, VaultError> {
+    if let Some(payload) = policy.strip_prefix("base64:") {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .map_err(|err| VaultError::Parse(err.to_string()))?;
+        String::from_utf8(bytes).map_err(|err| VaultError::Parse(err.to_string()))
+    } else {
+        Ok(policy.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_acl_policy_body, encode_acl_policy_name};
+
+    #[test]
+    fn decode_acl_policy_base64_prefix_decodes_utf8() {
+        let decoded = decode_acl_policy_body("base64:cGF0aCBcInNlY3JldC9cIiB7fQ==")
+            .expect("base64 policy should decode");
+        assert_eq!(decoded, "path \\\"secret/\\\" {}");
+    }
+
+    #[test]
+    fn encode_acl_policy_name_escapes_slashes() {
+        let encoded = encode_acl_policy_name("team/admin");
+        assert_eq!(encoded, "team%2Fadmin");
+    }
 }

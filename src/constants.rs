@@ -20,6 +20,8 @@ pub mod keys {
     pub const EDIT: char = 'e';
     /// `<c>` — copy the selected secret value to the clipboard.
     pub const COPY: char = 'c';
+    /// `:` — open the command line.
+    pub const COMMAND: char = ':';
 }
 
 /// Page/view identifiers used for routing.
@@ -30,6 +32,8 @@ pub mod pages {
     pub const ENGINES: &str = "engines";
     /// Hierarchical secret browser.
     pub const SECRETS: &str = "secrets";
+    /// ACL policy browser.
+    pub const POLICIES: &str = "policies";
     /// Secret key/value view (reveal/edit/copy/save).
     pub const SECRET_DATA: &str = "secret-data";
 }
@@ -40,6 +44,8 @@ pub mod titles {
     pub const ENGINES: &str = "[Secret Engines]";
     /// Secrets view title.
     pub const SECRETS: &str = "Secrets";
+    /// Policies view title.
+    pub const POLICIES: &str = "[Policies]";
 }
 
 /// Environment variables the app consults at startup.

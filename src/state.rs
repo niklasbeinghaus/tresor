@@ -15,6 +15,8 @@ pub enum Mode {
     Engines,
     /// Hierarchical KV2 secret browser.
     Secrets,
+    /// ACL policies browser.
+    Policies,
     /// Secret key/value detail view.
     SecretData,
 }
@@ -27,6 +29,7 @@ impl Mode {
             Self::Config => pages::CONFIG,
             Self::Engines => pages::ENGINES,
             Self::Secrets => pages::SECRETS,
+            Self::Policies => pages::POLICIES,
             Self::SecretData => pages::SECRET_DATA,
         }
     }
@@ -111,6 +114,7 @@ mod tests {
         assert_eq!(Mode::Config.page_id(), pages::CONFIG);
         assert_eq!(Mode::Engines.page_id(), pages::ENGINES);
         assert_eq!(Mode::Secrets.page_id(), pages::SECRETS);
+        assert_eq!(Mode::Policies.page_id(), pages::POLICIES);
         assert_eq!(Mode::SecretData.page_id(), pages::SECRET_DATA);
     }
 
