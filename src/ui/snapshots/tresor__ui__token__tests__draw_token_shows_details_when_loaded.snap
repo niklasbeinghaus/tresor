@@ -1,0 +1,20 @@
+---
+source: src/ui/token.rs
+expression: actual
+---
+┌Token Inspector───────────────────────────────────────────────────────────────────────────────────┐
+│accessor: 9f8e7d6c                                                                                │
+│display name: oidc-platform                                                                       │
+│policies: default, platform-eng                                                                   │
+│ttl: 58m 12s                                                                                      │
+│expires: 2026-10-13T11:00:00Z                                                                     │
+│renewable: yes                                                                                    │
+│use limit: unlimited                                                                              │
+│orphan: no                                                                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::model::{HealthInfo, KvData, SecretEntry, TokenInfo};
+use crate::model::{HealthInfo, KvData, MintedToken, SecretEntry, TokenInfo, WrappedToken};
 use crate::path::SecretPath;
 
 /// Composite key for a cached listing: mount engine plus relative KV path.
@@ -115,6 +115,41 @@ pub enum Msg {
         /// Cache key of the created secret.
         key: CacheKey,
     },
+    /// The active token was renewed successfully.
+    TokenRenewed {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+    },
+    /// A child token was minted (value shown once; never cached).
+    TokenMinted {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// The minted token details.
+        minted: MintedToken,
+    },
+    /// Data was wrapped into a wrapping token (shown once; never cached).
+    DataWrapped {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// The wrapping token details.
+        wrapped: WrappedToken,
+    },
+    /// A wrapping token was unwrapped into a pretty-printed payload.
+    DataUnwrapped {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Pretty-printed JSON payload.
+        payload: String,
+    },
+    /// Token-management capabilities for the active token were loaded (action gating).
+    TokenCapabilities {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Whether the token may create child tokens (`auth/token/create`).
+        can_create: bool,
+        /// Whether the token may wrap data (`sys/wrapping/wrap`).
+        can_wrap: bool,
+    },
 }
 
 /// In-memory cache the renderer folds messages into.
@@ -161,7 +196,12 @@ impl Store {
             | Msg::SecretWritten { .. }
             | Msg::Capabilities { .. }
             | Msg::SecretCreated { .. }
-            | Msg::SecretDeleted { .. } => true,
+            | Msg::SecretDeleted { .. }
+            | Msg::TokenRenewed { .. }
+            | Msg::TokenMinted { .. }
+            | Msg::DataWrapped { .. }
+            | Msg::DataUnwrapped { .. }
+            | Msg::TokenCapabilities { .. } => true,
             Msg::HardRefreshed { key, .. } => {
                 self.secrets.remove(&key);
                 true
@@ -219,6 +259,11 @@ impl Msg {
             | Self::Capabilities { generation, .. }
             | Self::SecretCreated { generation, .. }
             | Self::SecretDeleted { generation, .. }
+            | Self::TokenRenewed { generation, .. }
+            | Self::TokenMinted { generation, .. }
+            | Self::DataWrapped { generation, .. }
+            | Self::DataUnwrapped { generation, .. }
+            | Self::TokenCapabilities { generation, .. }
             | Self::HardRefreshed { generation, .. }
             | Self::PathNotFound { generation, .. }
             | Self::Failure { generation, .. } => *generation,

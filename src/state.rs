@@ -17,6 +17,8 @@ pub enum Mode {
     Secrets,
     /// Secret key/value detail view.
     SecretData,
+    /// Token inspector (lookup-self, renew-self, child tokens, wrapping).
+    Token,
 }
 
 impl Mode {
@@ -28,6 +30,7 @@ impl Mode {
             Self::Engines => pages::ENGINES,
             Self::Secrets => pages::SECRETS,
             Self::SecretData => pages::SECRET_DATA,
+            Self::Token => pages::TOKEN,
         }
     }
 }
@@ -112,6 +115,7 @@ mod tests {
         assert_eq!(Mode::Engines.page_id(), pages::ENGINES);
         assert_eq!(Mode::Secrets.page_id(), pages::SECRETS);
         assert_eq!(Mode::SecretData.page_id(), pages::SECRET_DATA);
+        assert_eq!(Mode::Token.page_id(), pages::TOKEN);
     }
 
     #[test]

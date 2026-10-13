@@ -18,6 +18,20 @@ pub enum PromptKind {
     NewKey,
     /// Confirmation before deleting a secret (`input` holds its name).
     DeleteSecret,
+    /// A `:` command-palette entry.
+    Command,
+    /// Policies for a child token (comma/space separated).
+    ChildTokenPolicies,
+    /// TTL for a child token (e.g. `1h`; blank for the server default).
+    ChildTokenTtl,
+    /// Use limit for a child token (blank for unlimited).
+    ChildTokenUses,
+    /// JSON payload to response-wrap.
+    WrapPayload,
+    /// Wrap TTL (blank for the server default).
+    WrapTtl,
+    /// A wrapping token to unwrap (rendered masked).
+    UnwrapToken,
 }
 
 impl PromptKind {
@@ -28,6 +42,13 @@ impl PromptKind {
             Self::NewSecret => "New Secret",
             Self::NewKey => "New Key",
             Self::DeleteSecret => "Delete Secret",
+            Self::Command => "Command",
+            Self::ChildTokenPolicies => "Child Token: Policies",
+            Self::ChildTokenTtl => "Child Token: TTL",
+            Self::ChildTokenUses => "Child Token: Use Limit",
+            Self::WrapPayload => "Wrap Payload",
+            Self::WrapTtl => "Wrap TTL",
+            Self::UnwrapToken => "Unwrap Token",
         }
     }
 
@@ -38,7 +59,31 @@ impl PromptKind {
             Self::NewSecret => "Secret name",
             Self::NewKey => "Key name",
             Self::DeleteSecret => "Confirm",
+            Self::Command => "Command",
+            Self::ChildTokenPolicies => "Policies (comma separated)",
+            Self::ChildTokenTtl => "TTL (e.g. 1h)",
+            Self::ChildTokenUses => "Use limit",
+            Self::WrapPayload => "Payload (JSON)",
+            Self::WrapTtl => "TTL (e.g. 5m)",
+            Self::UnwrapToken => "Wrapping token",
         }
+    }
+
+    /// True when the prompt refuses an empty submission.
+    ///
+    /// The TTL/use-limit/policy fields may be left blank (server defaults).
+    #[must_use]
+    pub const fn requires_input(self) -> bool {
+        !matches!(
+            self,
+            Self::ChildTokenPolicies | Self::ChildTokenTtl | Self::ChildTokenUses | Self::WrapTtl
+        )
+    }
+
+    /// True when the typed input is sensitive and must render masked.
+    #[must_use]
+    pub const fn masked_input(self) -> bool {
+        matches!(self, Self::UnwrapToken)
     }
 }
 
@@ -84,13 +129,18 @@ pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme
             Style::default().fg(theme.status_warn),
         ))
     } else {
+        let shown = if model.kind.masked_input() {
+            "*".repeat(model.input.chars().count())
+        } else {
+            model.input.clone()
+        };
         Line::from(vec![
             Span::styled(
                 format!("{}: ", model.kind.label()),
                 Style::default().fg(theme.leaf_fg),
             ),
             Span::styled(
-                model.input.as_str(),
+                shown,
                 Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
             ),
         ])

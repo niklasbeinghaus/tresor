@@ -7,8 +7,12 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 
+use serde_json::Value;
+
 pub use self::client::VaultClient;
-use crate::model::{HealthInfo, KvData, SecretEntry, TokenInfo};
+use crate::model::{
+    HealthInfo, KvData, MintedToken, SecretEntry, TokenCreateRequest, TokenInfo, WrappedToken,
+};
 use crate::path::SecretPath;
 
 pub mod client;
@@ -119,4 +123,29 @@ pub trait VaultApi: Send + Sync {
         &self,
         paths: &[String],
     ) -> impl Future<Output = Result<BTreeMap<String, Vec<String>>, VaultError>> + Send;
+
+    /// Renews the active token (`auth/token/renew-self`).
+    fn renew_token_self(&self) -> impl Future<Output = Result<(), VaultError>> + Send;
+
+    /// Creates a child token (`auth/token/create`). The returned token value is
+    /// shown to the user exactly once and never persisted.
+    fn create_token(
+        &self,
+        request: &TokenCreateRequest,
+    ) -> impl Future<Output = Result<MintedToken, VaultError>> + Send;
+
+    /// Wraps a JSON payload with response wrapping (`sys/wrapping/wrap`),
+    /// optionally setting the wrap TTL.
+    fn wrap_data(
+        &self,
+        data: &Value,
+        ttl: Option<&str>,
+    ) -> impl Future<Output = Result<WrappedToken, VaultError>> + Send;
+
+    /// Unwraps a wrapping token (`sys/wrapping/unwrap`) and returns the
+    /// pretty-printed payload.
+    fn unwrap_data(
+        &self,
+        wrapping_token: &str,
+    ) -> impl Future<Output = Result<String, VaultError>> + Send;
 }

@@ -9,12 +9,15 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use secrecy::{ExposeSecret as _, SecretString};
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::clipboard::{TextClipboard, default_clipboard};
 use crate::config::Config;
 use crate::constants::{NA_VALUE, STATUS_EXPIRY_SECS, keys};
-use crate::model::{HealthInfo, KvData, SecretEntry, TokenInfo};
+use crate::model::{
+    HealthInfo, KvData, MintedToken, SecretEntry, TokenCreateRequest, TokenInfo, WrappedToken,
+};
 use crate::path::SecretPath;
 use crate::state::Mode;
 use crate::store::{CacheKey, Msg, Store};
@@ -26,6 +29,7 @@ use crate::ui::modal::{ModalField, ModalModel, draw_modal};
 use crate::ui::prompt::{PromptKind, PromptModel, draw_prompt};
 use crate::ui::secret_data::{DataMode, KeyRow, SecretDataModel, draw_secret_data};
 use crate::ui::secrets::{SecretsModel, draw_secrets, sort_entries};
+use crate::ui::token::{PaneModel, TokenViewModel, draw_token};
 use crate::vault::{VaultApi, VaultError};
 
 const TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -93,7 +97,31 @@ pub struct SecretDataUi {
     pub original_data: BTreeMap<String, SecretString>,
 }
 
+/// Transient payload shown in the token inspector's preview pane.
+#[derive(Debug, Clone)]
+enum TokenPane {
+    /// A freshly minted child token.
+    Minted(MintedToken),
+    /// A wrapping token.
+    Wrapped(WrappedToken),
+    /// A pretty-printed unwrapped payload.
+    Unwrapped(String),
+}
+
+/// Child-token parameters accumulated across the chained input prompts.
+#[derive(Debug, Clone, Default)]
+struct ChildTokenDraft {
+    /// Policies to attach to the child token.
+    policies: Vec<String>,
+    /// Optional TTL for the child token.
+    ttl: Option<String>,
+}
+
 /// Running TUI application with injectable Vault API.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "capability flags are independent booleans read directly by the UI, not a state machine"
+)]
 pub struct App<V: VaultApi> {
     /// Current route state.
     pub state: AppState,
@@ -128,6 +156,22 @@ pub struct App<V: VaultApi> {
     pub can_delete: bool,
     /// Active input prompt, if any.
     pub prompt: Option<PromptState>,
+    /// Full token details for the token inspector (`lookup_self`).
+    pub token_details: Option<TokenInfo>,
+    /// Mode to return to when leaving the token inspector.
+    token_return: Mode,
+    /// Transient payload shown in the token inspector pane.
+    token_pane: Option<TokenPane>,
+    /// Child-token parameters accumulated across the chained prompts.
+    child_draft: Option<ChildTokenDraft>,
+    /// Parsed wrap payload awaiting a TTL.
+    wrap_payload: Option<Value>,
+    /// Token may create child tokens (`auth/token/create`).
+    pub token_can_create: bool,
+    /// Token may wrap data (`sys/wrapping/wrap`).
+    pub token_can_wrap: bool,
+    /// Whether the token capability probe has resolved (gating fails closed until then).
+    token_caps_loaded: bool,
     modal_addr: String,
     modal_token: String,
     modal_focus: ModalField,
@@ -220,6 +264,14 @@ impl<V: VaultApi + 'static> App<V> {
                 can_write: false,
                 can_delete: false,
                 prompt: None,
+                token_details: None,
+                token_return: Mode::Engines,
+                token_pane: None,
+                child_draft: None,
+                wrap_payload: None,
+                token_can_create: false,
+                token_can_wrap: false,
+                token_caps_loaded: false,
                 modal_addr: String::new(),
                 modal_token: String::new(),
                 modal_focus: ModalField::Addr,
@@ -294,18 +346,30 @@ impl<V: VaultApi + 'static> App<V> {
         if self.prompt.is_some() {
             return self.handle_prompt_input(key);
         }
+        if matches!(self.state, AppState::Main(_))
+            && key.code == KeyCode::Char(':')
+            && !self.inside_secret_editor()
+        {
+            self.open_command_prompt();
+            return false;
+        }
         match self.state {
             AppState::ConfigInput => self.handle_config_input(key),
             AppState::Main(Mode::Config) => false,
             AppState::Main(Mode::Engines) => self.handle_engines_input(key),
             AppState::Main(Mode::Secrets) => self.handle_secrets_input(key),
             AppState::Main(Mode::SecretData) => self.handle_secret_data_input(key),
+            AppState::Main(Mode::Token) => self.handle_token_input(key),
         }
     }
 
     /// Folds a background message into app/store state.
     pub fn apply(&mut self, msg: Msg) {
         self.pending = false;
+        if self.apply_token_event(&msg) {
+            let _accepted = self.store.apply(msg);
+            return;
+        }
         match &msg {
             Msg::HealthLoaded { info, .. } => self.apply_health(info),
             Msg::TokenLoaded { info, .. } => self.apply_token(info),
@@ -342,7 +406,12 @@ impl<V: VaultApi + 'static> App<V> {
             Msg::Capabilities { .. }
             | Msg::EnginesLoaded { .. }
             | Msg::SecretsLoaded { .. }
-            | Msg::HardRefreshed { .. } => {}
+            | Msg::HardRefreshed { .. }
+            | Msg::TokenRenewed { .. }
+            | Msg::TokenMinted { .. }
+            | Msg::DataWrapped { .. }
+            | Msg::DataUnwrapped { .. }
+            | Msg::TokenCapabilities { .. } => {}
         }
 
         let mut cache_msg = msg;
@@ -364,6 +433,63 @@ impl<V: VaultApi + 'static> App<V> {
                 self.can_delete = deletable;
             }
         }
+    }
+
+    /// Applies token-inspector messages, returning true when one was handled.
+    ///
+    /// Token results and the capability probe are generation-checked here so a
+    /// stale response can never overwrite newer UI state or reopen a gated action.
+    fn apply_token_event(&mut self, msg: &Msg) -> bool {
+        let current = self.store.generation();
+        match msg {
+            Msg::TokenRenewed { .. } => {
+                self.set_status(StatusKind::Success, "token renewed");
+                self.spawn_read_token(current);
+            }
+            Msg::TokenMinted { generation, minted } => {
+                if *generation == current {
+                    self.token_pane = Some(TokenPane::Minted(minted.clone()));
+                    self.set_status(
+                        StatusKind::Success,
+                        "child token created - press c to copy it now",
+                    );
+                }
+            }
+            Msg::DataWrapped {
+                generation,
+                wrapped,
+            } => {
+                if *generation == current {
+                    self.token_pane = Some(TokenPane::Wrapped(wrapped.clone()));
+                    self.set_status(
+                        StatusKind::Success,
+                        "data wrapped - press c to copy the token now",
+                    );
+                }
+            }
+            Msg::DataUnwrapped {
+                generation,
+                payload,
+            } => {
+                if *generation == current {
+                    self.token_pane = Some(TokenPane::Unwrapped(payload.clone()));
+                    self.set_status(StatusKind::Success, "wrapping token unwrapped");
+                }
+            }
+            Msg::TokenCapabilities {
+                generation,
+                can_create,
+                can_wrap,
+            } => {
+                if *generation == current {
+                    self.token_can_create = *can_create;
+                    self.token_can_wrap = *can_wrap;
+                    self.token_caps_loaded = true;
+                }
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// Handles a failed background operation. A failed secret read while the
@@ -416,6 +542,8 @@ impl<V: VaultApi + 'static> App<V> {
         Permission {
             write: self.can_write,
             delete: self.can_delete,
+            create_token: self.token_can_create,
+            wrap: self.token_can_wrap,
         }
     }
 
@@ -426,6 +554,7 @@ impl<V: VaultApi + 'static> App<V> {
             AppState::Main(Mode::Engines) => Page::Engines,
             AppState::Main(Mode::Secrets) => Page::Secrets,
             AppState::Main(Mode::SecretData) => Page::SecretData,
+            AppState::Main(Mode::Token) => Page::Token,
         }
     }
 
@@ -481,6 +610,51 @@ impl<V: VaultApi + 'static> App<V> {
         }
     }
 
+    /// Builds the pure token inspector render model.
+    pub fn token_model(&self) -> TokenViewModel {
+        let details = self.token_details.clone().unwrap_or_default();
+        TokenViewModel {
+            loaded: self.token_details.is_some(),
+            accessor: value_or_na(&details.accessor),
+            display_name: value_or_na(&details.display_name),
+            policies: if details.policies.is_empty() {
+                NA_VALUE.to_owned()
+            } else {
+                details.policies.join(", ")
+            },
+            ttl: ttl_text(details.ttl),
+            expire_time: details
+                .expire_time
+                .clone()
+                .unwrap_or_else(|| "never".to_owned()),
+            renewable: details.renewable,
+            num_uses: uses_text(details.num_uses),
+            orphan: details.orphan,
+            pane: self.token_pane_model(),
+        }
+    }
+
+    fn token_pane_model(&self) -> Option<PaneModel> {
+        let pane = self.token_pane.as_ref()?;
+        Some(match pane {
+            TokenPane::Minted(minted) => PaneModel {
+                title: "New Token (shown once)".to_owned(),
+                warning: Some("copy now - this token is never shown again".to_owned()),
+                body: minted.token.expose_secret().to_owned(),
+            },
+            TokenPane::Wrapped(wrapped) => PaneModel {
+                title: "Wrapping Token (shown once)".to_owned(),
+                warning: Some("copy now - this wrapping token is single-use".to_owned()),
+                body: wrapped.token.expose_secret().to_owned(),
+            },
+            TokenPane::Unwrapped(payload) => PaneModel {
+                title: "Unwrapped Payload".to_owned(),
+                warning: None,
+                body: payload.clone(),
+            },
+        })
+    }
+
     /// Draws the complete app surface.
     pub fn draw(&self, frame: &mut Frame<'_>, area: Rect) {
         // Header needs 3 inner rows (wordmark, info, status) + borders; a shorter
@@ -524,6 +698,9 @@ impl<V: VaultApi + 'static> App<V> {
                 if let Some(model) = self.secret_data_model() {
                     draw_secret_data(frame, *body_area, &model, &self.theme);
                 }
+            }
+            AppState::Main(Mode::Token) => {
+                draw_token(frame, *body_area, &self.token_model(), &self.theme);
             }
         }
         if let Some(prompt) = &self.prompt {
@@ -773,6 +950,282 @@ impl<V: VaultApi + 'static> App<V> {
         }
     }
 
+    fn handle_token_input(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => self.leave_token_view(),
+            KeyCode::Char('r') => self.spawn_renew_token(),
+            KeyCode::Char('n') => self.open_child_token_prompt(),
+            KeyCode::Char('w') => self.open_wrap_prompt(),
+            KeyCode::Char('u') => self.open_unwrap_prompt(),
+            KeyCode::Char('c') => self.copy_token_pane(),
+            _ => {}
+        }
+        false
+    }
+
+    /// Leaves the token inspector, discarding any minted/wrapping token shown so
+    /// it is never displayed again (the "shown once" contract).
+    fn leave_token_view(&mut self) {
+        self.token_pane = None;
+        self.child_draft = None;
+        self.wrap_payload = None;
+        self.state = AppState::Main(self.token_return);
+    }
+
+    fn open_token_view(&mut self) {
+        let current = match &self.state {
+            AppState::Main(mode) => *mode,
+            AppState::ConfigInput => Mode::Config,
+        };
+        if current != Mode::Token {
+            self.token_return = current;
+        }
+        self.state = AppState::Main(Mode::Token);
+        self.token_pane = None;
+        self.child_draft = None;
+        self.wrap_payload = None;
+        self.token_can_create = false;
+        self.token_can_wrap = false;
+        self.token_caps_loaded = false;
+        if self.token_details.is_none() {
+            self.spawn_read_token(self.store.generation());
+        }
+        self.spawn_token_capabilities(self.store.generation());
+    }
+
+    fn open_command_prompt(&mut self) {
+        self.prompt = Some(PromptState {
+            kind: PromptKind::Command,
+            input: String::new(),
+            error: None,
+        });
+    }
+
+    fn open_child_token_prompt(&mut self) {
+        if self.token_caps_loaded && !self.token_can_create {
+            self.set_status(StatusKind::Error, "no permission to create child tokens");
+            return;
+        }
+        self.child_draft = Some(ChildTokenDraft::default());
+        self.next_prompt(PromptKind::ChildTokenPolicies);
+    }
+
+    fn open_wrap_prompt(&mut self) {
+        if self.token_caps_loaded && !self.token_can_wrap {
+            self.set_status(StatusKind::Error, "no permission to wrap data");
+            return;
+        }
+        self.next_prompt(PromptKind::WrapPayload);
+    }
+
+    fn open_unwrap_prompt(&mut self) {
+        self.next_prompt(PromptKind::UnwrapToken);
+    }
+
+    fn next_prompt(&mut self, kind: PromptKind) {
+        self.prompt = Some(PromptState {
+            kind,
+            input: String::new(),
+            error: None,
+        });
+    }
+
+    fn reopen_prompt(&mut self, kind: PromptKind, error: impl Into<String>) {
+        self.prompt = Some(PromptState {
+            kind,
+            input: String::new(),
+            error: Some(error.into()),
+        });
+    }
+
+    fn run_command(&mut self, input: &str) {
+        let command = input.split_whitespace().next().unwrap_or_default();
+        match command {
+            "token" | "t" => self.open_token_view(),
+            "unwrap" | "u" => {
+                self.open_token_view();
+                self.open_unwrap_prompt();
+            }
+            "wrap" | "w" => {
+                self.open_token_view();
+                self.open_wrap_prompt();
+            }
+            other => {
+                let message = if other.is_empty() {
+                    "enter a command: token, unwrap, wrap".to_owned()
+                } else {
+                    format!("unknown command: {other}")
+                };
+                self.reopen_prompt(PromptKind::Command, message);
+            }
+        }
+    }
+
+    fn advance_child_policies(&mut self, input: &str) {
+        let policies = input
+            .split([',', ' '])
+            .filter(|policy| !policy.is_empty())
+            .map(str::to_owned)
+            .collect();
+        self.child_draft = Some(ChildTokenDraft {
+            policies,
+            ttl: None,
+        });
+        self.next_prompt(PromptKind::ChildTokenTtl);
+    }
+
+    fn advance_child_ttl(&mut self, input: &str) {
+        let ttl = if input.is_empty() {
+            None
+        } else {
+            Some(input.to_owned())
+        };
+        if let Some(draft) = self.child_draft.as_mut() {
+            draft.ttl = ttl;
+        }
+        self.next_prompt(PromptKind::ChildTokenUses);
+    }
+
+    fn finish_child_token(&mut self, input: &str) {
+        if !self.token_can_create {
+            self.set_status(StatusKind::Error, "no permission to create child tokens");
+            return;
+        }
+        let num_uses = if input.is_empty() {
+            None
+        } else {
+            let Ok(uses) = input.parse::<u64>() else {
+                self.reopen_prompt(
+                    PromptKind::ChildTokenUses,
+                    "use limit must be a whole number",
+                );
+                return;
+            };
+            Some(uses)
+        };
+        let draft = self.child_draft.take().unwrap_or_default();
+        self.spawn_create_token(TokenCreateRequest {
+            policies: draft.policies,
+            ttl: draft.ttl,
+            num_uses,
+        });
+    }
+
+    fn advance_wrap_payload(&mut self, input: &str) {
+        match serde_json::from_str::<Value>(input) {
+            Ok(payload) => {
+                self.wrap_payload = Some(payload);
+                self.next_prompt(PromptKind::WrapTtl);
+            }
+            Err(_) => self.reopen_prompt(PromptKind::WrapPayload, "payload must be valid JSON"),
+        }
+    }
+
+    fn finish_wrap(&mut self, input: &str) {
+        if !self.token_can_wrap {
+            self.set_status(StatusKind::Error, "no permission to wrap data");
+            return;
+        }
+        let ttl = if input.is_empty() {
+            None
+        } else {
+            Some(input.to_owned())
+        };
+        let payload = self.wrap_payload.take().unwrap_or(Value::Null);
+        self.spawn_wrap(payload, ttl);
+    }
+
+    fn copy_token_pane(&mut self) {
+        let Some(pane) = self.token_pane_model() else {
+            self.set_status(StatusKind::Info, "nothing to copy");
+            return;
+        };
+        match self.clipboard.copy(&pane.body) {
+            Ok(()) => self.set_status(StatusKind::Success, "Copied to clipboard"),
+            Err(err) => self.set_status(StatusKind::Error, err.to_string()),
+        }
+    }
+
+    fn spawn_renew_token(&mut self) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            timed(generation, vault.renew_token_self(), |()| {
+                Msg::TokenRenewed { generation }
+            })
+            .await
+        });
+    }
+
+    fn spawn_create_token(&mut self, request: TokenCreateRequest) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            timed(generation, vault.create_token(&request), |minted| {
+                Msg::TokenMinted { generation, minted }
+            })
+            .await
+        });
+    }
+
+    fn spawn_wrap(&mut self, payload: Value, ttl: Option<String>) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            timed(
+                generation,
+                vault.wrap_data(&payload, ttl.as_deref()),
+                |wrapped| Msg::DataWrapped {
+                    generation,
+                    wrapped,
+                },
+            )
+            .await
+        });
+    }
+
+    fn spawn_unwrap(&mut self, wrapping_token: &str) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        let wrapping_token = wrapping_token.to_owned();
+        self.spawn_msg(self.tx.clone(), async move {
+            timed(generation, vault.unwrap_data(&wrapping_token), |payload| {
+                Msg::DataUnwrapped {
+                    generation,
+                    payload,
+                }
+            })
+            .await
+        });
+    }
+
+    fn spawn_token_capabilities(&self, generation: u64) {
+        let paths = vec![
+            "auth/token/create".to_owned(),
+            "sys/wrapping/wrap".to_owned(),
+        ];
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            let (can_create, can_wrap) =
+                match tokio::time::timeout(TASK_TIMEOUT, vault.capabilities_self(&paths)).await {
+                    Ok(Ok(caps)) => (
+                        caps_allow(&caps, "auth/token/create"),
+                        caps_allow(&caps, "sys/wrapping/wrap"),
+                    ),
+                    _ => (false, false),
+                };
+            Msg::TokenCapabilities {
+                generation,
+                can_create,
+                can_wrap,
+            }
+        });
+    }
+
     fn open_selected_engine(&mut self) {
         let Some(entry) = self.store.engines().get(self.engines_selected) else {
             return;
@@ -976,6 +1429,7 @@ impl<V: VaultApi + 'static> App<V> {
     }
 
     fn apply_token(&mut self, token: &TokenInfo) {
+        self.token_details = Some(token.clone());
         let mut info = self.info.clone().unwrap_or_default();
         info.policies = if token.policies.is_empty() {
             NA_VALUE.to_owned()
@@ -1224,7 +1678,11 @@ impl<V: VaultApi + 'static> App<V> {
     #[must_use]
     fn handle_prompt_input(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Esc => self.prompt = None,
+            KeyCode::Esc => {
+                self.prompt = None;
+                self.child_draft = None;
+                self.wrap_payload = None;
+            }
             KeyCode::Enter => self.submit_prompt(),
             KeyCode::Backspace => {
                 if let Some(prompt) = self.prompt.as_mut() {
@@ -1247,16 +1705,23 @@ impl<V: VaultApi + 'static> App<V> {
         let Some(mut prompt) = self.prompt.take() else {
             return;
         };
-        let name = prompt.input.trim().to_owned();
-        if name.is_empty() {
-            prompt.error = Some("name cannot be empty".to_owned());
+        let input = prompt.input.trim().to_owned();
+        if prompt.kind.requires_input() && input.is_empty() {
+            prompt.error = Some(empty_prompt_message(prompt.kind).to_owned());
             self.prompt = Some(prompt);
             return;
         }
         match prompt.kind {
-            PromptKind::NewSecret => self.create_secret(&name),
-            PromptKind::NewKey => self.add_key(&name),
-            PromptKind::DeleteSecret => self.delete_secret(&name),
+            PromptKind::NewSecret => self.create_secret(&input),
+            PromptKind::NewKey => self.add_key(&input),
+            PromptKind::DeleteSecret => self.delete_secret(&input),
+            PromptKind::Command => self.run_command(&input),
+            PromptKind::ChildTokenPolicies => self.advance_child_policies(&input),
+            PromptKind::ChildTokenTtl => self.advance_child_ttl(&input),
+            PromptKind::ChildTokenUses => self.finish_child_token(&input),
+            PromptKind::WrapPayload => self.advance_wrap_payload(&input),
+            PromptKind::WrapTtl => self.finish_wrap(&input),
+            PromptKind::UnwrapToken => self.spawn_unwrap(&input),
         }
     }
 
@@ -1380,6 +1845,46 @@ fn next_index(current: usize, len: usize) -> usize {
 
 fn secret_updated_text(path: &str) -> String {
     format!("Secret '{path}' updated successfully")
+}
+
+const fn empty_prompt_message(kind: PromptKind) -> &'static str {
+    match kind {
+        PromptKind::NewSecret | PromptKind::NewKey => "name cannot be empty",
+        _ => "input cannot be empty",
+    }
+}
+
+fn value_or_na(value: &str) -> String {
+    if value.is_empty() {
+        NA_VALUE.to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
+fn ttl_text(seconds: u64) -> String {
+    if seconds == 0 {
+        return "none".to_owned();
+    }
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+    format!("{hours}h {minutes}m {secs}s")
+}
+
+fn uses_text(uses: u64) -> String {
+    if uses == 0 {
+        "unlimited".to_owned()
+    } else {
+        uses.to_string()
+    }
+}
+
+fn caps_allow(caps: &BTreeMap<String, Vec<String>>, path: &str) -> bool {
+    caps.get(path).is_some_and(|list| {
+        list.iter()
+            .any(|cap| matches!(cap.as_str(), "create" | "update" | "root"))
+    })
 }
 
 #[cfg(test)]
@@ -1563,6 +2068,7 @@ mod tests {
                 Ok(TokenInfo {
                     policies: vec!["root".to_owned()],
                     expire_time: None,
+                    ..TokenInfo::default()
                 })
             }
         }
@@ -1601,6 +2107,47 @@ mod tests {
                     })
                     .collect())
             }
+        }
+
+        fn renew_token_self(&self) -> impl Future<Output = Result<(), VaultError>> + Send {
+            async move { Ok(()) }
+        }
+
+        fn create_token(
+            &self,
+            request: &TokenCreateRequest,
+        ) -> impl Future<Output = Result<MintedToken, VaultError>> + Send {
+            let policies = request.policies.clone();
+            async move {
+                Ok(MintedToken {
+                    token: SecretString::from("child-token-value"),
+                    accessor: "child-accessor".to_owned(),
+                    policies,
+                    ttl: None,
+                    renewable: false,
+                })
+            }
+        }
+
+        fn wrap_data(
+            &self,
+            _data: &Value,
+            _ttl: Option<&str>,
+        ) -> impl Future<Output = Result<WrappedToken, VaultError>> + Send {
+            async move {
+                Ok(WrappedToken {
+                    token: SecretString::from("wrapping-token-value"),
+                    accessor: "wrap-accessor".to_owned(),
+                    ttl: 300,
+                })
+            }
+        }
+
+        fn unwrap_data(
+            &self,
+            _wrapping_token: &str,
+        ) -> impl Future<Output = Result<String, VaultError>> + Send {
+            async move { Ok("{\n  \"password\": \"hunter2\"\n}".to_owned()) }
         }
     }
 
@@ -2092,5 +2639,306 @@ mod tests {
             })
         };
         assert!(deleted);
+    }
+
+    async fn drain_up_to(
+        app: &mut App<FakeVault>,
+        rx: &mut mpsc::UnboundedReceiver<Msg>,
+        max: usize,
+    ) {
+        for _ in 0..max {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+                Ok(Some(msg)) => app.apply(msg),
+                _ => break,
+            }
+        }
+    }
+
+    #[test]
+    fn colon_opens_command_prompt_outside_editor() {
+        // Given: the engines view.
+        let (mut app, _rx, _vault) = test_app();
+
+        // When: `:` is pressed.
+        app.handle_input(key(KeyCode::Char(':')));
+
+        // Then: the command prompt opens.
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::Command)
+        );
+    }
+
+    #[test]
+    fn colon_is_literal_text_inside_secret_editor() {
+        // Given: an open secret in edit mode.
+        let (mut app, _rx, _vault) = test_app();
+        let kv = kv_data("pw");
+        let original = kv.data.clone();
+        app.secret_data = Some(SecretDataUi {
+            key: SecretPath::new("team/creds"),
+            data: kv,
+            selected: 0,
+            mode: DataMode::Edit {
+                key: "password".to_owned(),
+                text: String::new(),
+            },
+            original_data: original,
+        });
+        app.state = AppState::Main(Mode::SecretData);
+
+        // When: `:` is pressed while editing.
+        app.handle_input(key(KeyCode::Char(':')));
+
+        // Then: it is typed into the value rather than opening the palette.
+        assert_eq!(app.prompt, None);
+        let ui = app.secret_data.as_ref().expect("secret data");
+        assert_eq!(
+            ui.mode,
+            DataMode::Edit {
+                key: "password".to_owned(),
+                text: ":".to_owned()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn command_token_opens_inspector_with_details_and_capabilities() {
+        // Given: the engines view with a token that may manage tokens.
+        let (mut app, mut rx, _vault) = test_app();
+
+        // When: `:token` is submitted.
+        app.handle_input(key(KeyCode::Char(':')));
+        for ch in "token".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+
+        // Then: the inspector is shown with loaded details and probed capabilities.
+        assert_eq!(app.state, AppState::Main(Mode::Token));
+        drain_up_to(&mut app, &mut rx, 6).await;
+        assert!(app.token_model().loaded);
+        assert!(app.token_can_create);
+        assert!(app.token_can_wrap);
+    }
+
+    #[tokio::test]
+    async fn renew_token_reports_success() {
+        // Given: an open token inspector.
+        let (mut app, mut rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Token);
+        app.token_details = Some(TokenInfo::default());
+
+        // When: `r` renews the token.
+        app.handle_input(key(KeyCode::Char('r')));
+        drain_up_to(&mut app, &mut rx, 4).await;
+
+        // Then: a success status is surfaced.
+        assert_eq!(
+            app.status.as_ref().map(|status| status.text.as_str()),
+            Some("token renewed")
+        );
+    }
+
+    #[tokio::test]
+    async fn child_token_prompt_chain_mints_token_shown_once() {
+        // Given: an open token inspector with create rights.
+        let (mut app, mut rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Token);
+        app.token_details = Some(TokenInfo::default());
+        app.token_can_create = true;
+
+        // When: `n` drives the policies -> ttl -> uses prompt chain.
+        app.handle_input(key(KeyCode::Char('n')));
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::ChildTokenPolicies)
+        );
+        for ch in "default,app".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::ChildTokenTtl)
+        );
+        for ch in "1h".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::ChildTokenUses)
+        );
+        app.handle_input(key(KeyCode::Char('3')));
+        app.handle_input(key(KeyCode::Enter));
+        drain_up_to(&mut app, &mut rx, 4).await;
+
+        // Then: the minted token is shown once in the preview pane with a warning.
+        let pane = app.token_model().pane.expect("pane");
+        assert_eq!(pane.title, "New Token (shown once)");
+        assert_eq!(pane.body, "child-token-value");
+        assert!(pane.warning.is_some());
+    }
+
+    #[tokio::test]
+    async fn unwrap_command_shows_payload_in_pane() {
+        // Given: the engines view.
+        let (mut app, mut rx, _vault) = test_app();
+
+        // When: `:unwrap` is submitted with a wrapping token.
+        app.handle_input(key(KeyCode::Char(':')));
+        for ch in "unwrap".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::UnwrapToken)
+        );
+        for ch in "hvs.wrapping".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        drain_up_to(&mut app, &mut rx, 6).await;
+
+        // Then: the inspector shows the pretty-printed payload.
+        assert_eq!(app.state, AppState::Main(Mode::Token));
+        let pane = app.token_model().pane.expect("pane");
+        assert!(pane.body.contains("hunter2"));
+    }
+
+    #[test]
+    fn copy_token_pane_copies_the_payload() {
+        // Given: a token inspector showing an unwrapped payload.
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Token);
+        app.clipboard = Box::<TestClipboard>::default();
+        app.token_pane = Some(TokenPane::Unwrapped("{\"a\":1}".to_owned()));
+
+        // When: `c` is pressed.
+        app.handle_input(key(KeyCode::Char('c')));
+
+        // Then: the payload is copied.
+        assert_eq!(
+            app.status.as_ref().map(|status| status.text.as_str()),
+            Some("Copied to clipboard")
+        );
+    }
+
+    #[test]
+    fn copy_token_pane_without_payload_reports_nothing_to_copy() {
+        // Given: a token inspector with no preview pane.
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Token);
+        app.token_details = Some(TokenInfo::default());
+
+        // When: `c` is pressed.
+        app.handle_input(key(KeyCode::Char('c')));
+
+        // Then: an informational status is shown.
+        assert_eq!(
+            app.status.as_ref().map(|status| status.text.as_str()),
+            Some("nothing to copy")
+        );
+    }
+
+    #[test]
+    fn unknown_command_keeps_prompt_open_with_error() {
+        // Given: the command palette.
+        let (mut app, _rx, _vault) = test_app();
+        app.handle_input(key(KeyCode::Char(':')));
+        for ch in "nope".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+
+        // When: an unknown command is submitted.
+        app.handle_input(key(KeyCode::Enter));
+
+        // Then: the prompt stays open with an explanatory error.
+        let prompt = app.prompt.as_ref().expect("prompt");
+        assert_eq!(prompt.kind, PromptKind::Command);
+        assert!(prompt.error.is_some());
+    }
+
+    #[test]
+    fn child_token_creation_gated_when_capability_missing() {
+        // Given: a token with a resolved probe that denies child-token creation.
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Token);
+        app.token_details = Some(TokenInfo::default());
+        app.token_caps_loaded = true;
+        app.token_can_create = false;
+
+        // When: `n` is pressed.
+        app.handle_input(key(KeyCode::Char('n')));
+
+        // Then: no prompt opens and a permission error is shown.
+        assert_eq!(app.prompt, None);
+        assert_eq!(
+            app.status.as_ref().map(|status| status.kind),
+            Some(StatusKind::Error)
+        );
+    }
+
+    #[test]
+    fn child_token_prompt_denies_at_submit_while_capabilities_pending() {
+        // Given: capabilities still probing (fail-closed) so the prompt is allowed to open.
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Token);
+        app.token_details = Some(TokenInfo::default());
+        app.token_caps_loaded = false;
+        app.token_can_create = false;
+
+        // When: `n` opens the chain and all three prompts are submitted.
+        app.handle_input(key(KeyCode::Char('n')));
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::ChildTokenPolicies)
+        );
+        for ch in "default".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Enter));
+
+        // Then: minting is refused at submit and no prompt remains.
+        assert_eq!(app.prompt, None);
+        assert_eq!(
+            app.status.as_ref().map(|status| status.kind),
+            Some(StatusKind::Error)
+        );
+    }
+
+    #[test]
+    fn leaving_token_inspector_discards_shown_token() {
+        // Given: a token inspector displaying a one-time payload.
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Token);
+        app.token_details = Some(TokenInfo::default());
+        app.token_pane = Some(TokenPane::Unwrapped("secret-payload".to_owned()));
+
+        // When: the inspector is left.
+        app.handle_input(key(KeyCode::Esc));
+
+        // Then: the payload is no longer held in memory.
+        assert!(app.token_pane.is_none());
+        assert_eq!(app.state, AppState::Main(Mode::Engines));
+    }
+
+    #[test]
+    fn escape_returns_from_token_inspector_to_previous_mode() {
+        // Given: the token inspector opened from the secret data view.
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::SecretData);
+        app.open_token_view();
+        assert_eq!(app.state, AppState::Main(Mode::Token));
+
+        // When: Esc is pressed.
+        app.handle_input(key(KeyCode::Esc));
+
+        // Then: the previous mode is restored.
+        assert_eq!(app.state, AppState::Main(Mode::SecretData));
     }
 }

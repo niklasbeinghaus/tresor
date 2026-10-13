@@ -71,6 +71,20 @@ pub struct TokenInfo {
     pub policies: Vec<String>,
     /// `None` when the token never expires (`Go` displays "eternal" for root tokens).
     pub expire_time: Option<String>,
+    /// Opaque token accessor (safe to display; identifies the token).
+    pub accessor: String,
+    /// Human-readable token display name.
+    pub display_name: String,
+    /// Remaining time-to-live in seconds (`0` when the token does not expire).
+    pub ttl: u64,
+    /// Token creation time as Unix epoch seconds (`0` when unknown).
+    pub creation_time: u64,
+    /// Whether the token may be renewed.
+    pub renewable: bool,
+    /// Remaining allowed uses (`0` means unlimited).
+    pub num_uses: u64,
+    /// Whether the token was created without a parent.
+    pub orphan: bool,
 }
 
 impl TokenInfo {
@@ -79,6 +93,43 @@ impl TokenInfo {
     pub fn is_eternal(&self) -> bool {
         self.expire_time.is_none() && self.policies.iter().any(|p| p == "root")
     }
+}
+
+/// Parameters for creating a child token (`auth/token/create`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TokenCreateRequest {
+    /// Policies to attach to the child token.
+    pub policies: Vec<String>,
+    /// Requested TTL as a Vault duration string (e.g. `1h`); `None` uses the default.
+    pub ttl: Option<String>,
+    /// Maximum number of uses (`None` means unlimited).
+    pub num_uses: Option<u64>,
+}
+
+/// A freshly minted child token. The token value is shown once and never stored.
+#[derive(Debug, Clone)]
+pub struct MintedToken {
+    /// The secret token value (shown once, then discarded by the UI).
+    pub token: SecretString,
+    /// Accessor for the minted token (safe to retain/display).
+    pub accessor: String,
+    /// Policies attached to the minted token.
+    pub policies: Vec<String>,
+    /// Lease duration in seconds (`None` when the server did not report one).
+    pub ttl: Option<u64>,
+    /// Whether the minted token is renewable.
+    pub renewable: bool,
+}
+
+/// A wrapping token returned by `sys/wrapping/wrap` (shown once).
+#[derive(Debug, Clone)]
+pub struct WrappedToken {
+    /// The wrapping token value (shown once, then discarded by the UI).
+    pub token: SecretString,
+    /// Accessor for the wrapping token.
+    pub accessor: String,
+    /// Wrap TTL in seconds as reported by the server.
+    pub ttl: u64,
 }
 
 /// Snapshot of `/v1/sys/health`.
@@ -99,6 +150,7 @@ mod tests {
         let info = TokenInfo {
             policies: vec!["root".into()],
             expire_time: None,
+            ..TokenInfo::default()
         };
         assert!(info.is_eternal());
     }
@@ -108,6 +160,7 @@ mod tests {
         let info = TokenInfo {
             policies: vec!["root".into()],
             expire_time: Some("2027-01-01T00:00:00Z".into()),
+            ..TokenInfo::default()
         };
         assert!(!info.is_eternal());
     }
@@ -117,6 +170,7 @@ mod tests {
         let info = TokenInfo {
             policies: vec!["default".into()],
             expire_time: None,
+            ..TokenInfo::default()
         };
         assert!(!info.is_eternal());
     }
