@@ -215,9 +215,8 @@ token_command = "pass show vault/prod-token"
   empty `addr` is skipped with a warning.
 
 Startup precedence: environment config (`BAO_*`/`VAULT_*`) → `current` profile →
-the configuration modal. Press `:` and run `ctx` (aliases `context`, `contexts`)
-to switch profiles at runtime; the picker is type-to-filter and marks the
-connected profile with `●`.
+the configuration modal. Press `:` and run `ctx` to switch profiles at runtime;
+the picker is type-to-filter and marks the connected profile with `●`.
 
 ## Theme
 
