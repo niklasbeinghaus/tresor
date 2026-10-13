@@ -35,12 +35,23 @@ async fn main() -> Result<()> {
         .with_env_filter(filter)
         .init();
 
-    if std::env::args().any(|arg| arg == "--check") {
-        return run_check(Config::from_env().context(
-            "no configuration: set BAO_ADDR (or VAULT_ADDR) and provide a token \
+    match std::env::args().nth(1).as_deref() {
+        Some("--check") => {
+            return run_check(Config::from_env().context(
+                "no configuration: set BAO_ADDR (or VAULT_ADDR) and provide a token \
                  (BAO_TOKEN/VAULT_TOKEN env or the ~/.vault-token written by `bao login`)",
-        )?)
-        .await;
+            )?)
+            .await;
+        }
+        Some("--version" | "-V") => {
+            print_version();
+            return Ok(());
+        }
+        Some("--help" | "-h") => {
+            print_help();
+            return Ok(());
+        }
+        _ => {}
     }
 
     let env_config = Config::from_env();
@@ -122,6 +133,37 @@ async fn main() -> Result<()> {
 
     restore_terminal();
     Ok(())
+}
+
+#[allow(
+    clippy::print_stdout,
+    reason = "CLI surface; stdout is the report channel"
+)]
+fn print_version() {
+    println!("tresor {}", env!("CARGO_PKG_VERSION"));
+}
+
+#[allow(
+    clippy::print_stdout,
+    reason = "CLI surface; stdout is the report channel"
+)]
+fn print_help() {
+    println!(
+        "tresor {} — a k9s-style TUI for HashiCorp Vault and OpenBao
+
+USAGE:
+  tresor             run the TUI
+  tresor --check     connectivity/API diagnostic (health, token, engines, KV2 list)
+  tresor --version   print the version
+  tresor --help      print this help
+
+CONFIGURATION (first match wins):
+  BAO_ADDR / VAULT_ADDR              Vault or OpenBao address
+  BAO_TOKEN / VAULT_TOKEN            authentication token
+  BAO_TOKEN_PATH / VAULT_TOKEN_PATH  CLI token store override
+  ~/.vault-token                     written by `vault login` / `bao login`",
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 fn restore_terminal() {
