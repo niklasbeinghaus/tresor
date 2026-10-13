@@ -9,28 +9,35 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use secrecy::{ExposeSecret as _, SecretString};
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::clipboard::{TextClipboard, default_clipboard};
 use crate::config::Config;
 use crate::constants::{NA_VALUE, STATUS_EXPIRY_SECS, keys};
+use crate::editor::{EditBuffer, EditOutcome, EditorError};
 use crate::fuzzy;
-use crate::model::{HealthInfo, KvData, SecretEntry, TokenInfo};
+use crate::model::{
+    HealthInfo, KvData, MintedToken, SecretEntry, TokenCreateRequest, TokenInfo, WrappedToken,
+};
 use crate::path::SecretPath;
 use crate::profiles::{ConnectRequest, Profile, Profiles};
 use crate::state::Mode;
 use crate::store::{CacheKey, Msg, Store};
 use crate::theme::Theme;
+use crate::ui::command_line::{CommandLineModel, draw_command_line};
 use crate::ui::commands::{CommandBarInput, Page, Permission, draw_commands_with_input};
 use crate::ui::contexts::{ContextRow, ContextsModel, draw_contexts};
 use crate::ui::engines::{EnginesModel, draw_engines};
 use crate::ui::header::{HeaderModel, StatusKind, StatusLine, draw_header};
 use crate::ui::modal::{ModalField, ModalModel, draw_modal};
 use crate::ui::palette::{PaletteModel, PaletteRow, draw_palette};
+use crate::ui::policies::{PoliciesModel, PolicyPreview, draw_policies};
 use crate::ui::prompt::{PromptKind, PromptModel, draw_prompt};
 use crate::ui::secret_data::{DataMode, KeyRow, SecretDataModel, draw_secret_data};
 use crate::ui::secrets::{SecretsModel, draw_secrets, sort_entries};
-use crate::vault::{VaultApi, VaultError};
+use crate::ui::token::{PaneModel, TokenViewModel, draw_token};
+use crate::vault::{VaultApi, VaultError, encode_acl_policy_name};
 
 const TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -47,6 +54,56 @@ pub struct PromptState {
     pub input: String,
     /// Optional error (e.g. empty name, permission denied).
     pub error: Option<String>,
+    /// Optional detail line shown in confirm prompts.
+    pub detail: Option<String>,
+}
+
+/// Inline `:` command-line state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandLineState {
+    /// Command text without leading `:`.
+    pub input: String,
+    /// Optional command parse/dispatch error.
+    pub error: Option<String>,
+}
+
+/// Pending policy save payload between editor close and confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPolicySave {
+    /// Policy name.
+    pub name: String,
+    /// Original policy text.
+    pub old_policy: String,
+    /// New policy text.
+    pub new_policy: String,
+}
+
+/// Editor callback target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditorTarget {
+    /// Edit an ACL policy document.
+    Policy {
+        /// Policy name.
+        name: String,
+        /// Policy text loaded before editor launch.
+        original_policy: String,
+    },
+}
+
+/// Editor request emitted by the app and consumed by the terminal owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorRequest {
+    /// Requested target.
+    pub target: EditorTarget,
+    /// Text buffer metadata.
+    pub buffer: EditBuffer,
+}
+
+enum PolicyEffect {
+    PoliciesLoaded,
+    PolicyLoaded(String),
+    PolicyWritten(String),
+    PolicyCapabilities { name: String, writable: bool },
 }
 
 /// An active overlay drawn above the current page.
@@ -188,7 +245,31 @@ pub struct SecretDataUi {
     pub original_data: BTreeMap<String, SecretString>,
 }
 
+/// Transient payload shown in the token inspector's preview pane.
+#[derive(Debug, Clone)]
+enum TokenPane {
+    /// A freshly minted child token.
+    Minted(MintedToken),
+    /// A wrapping token.
+    Wrapped(WrappedToken),
+    /// A pretty-printed unwrapped payload.
+    Unwrapped(String),
+}
+
+/// Child-token parameters accumulated across the chained input prompts.
+#[derive(Debug, Clone, Default)]
+struct ChildTokenDraft {
+    /// Policies to attach to the child token.
+    policies: Vec<String>,
+    /// Optional TTL for the child token.
+    ttl: Option<String>,
+}
+
 /// Running TUI application with injectable Vault API.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "capability flags are independent booleans read directly by the UI, not a state machine"
+)]
 pub struct App<V: VaultApi> {
     /// Current route state.
     pub state: AppState,
@@ -227,6 +308,34 @@ pub struct App<V: VaultApi> {
     pub overlay: Option<Overlay>,
     /// Active presentation-only filter for the focused list.
     pub filter: Option<FilterState>,
+    /// Full token details for the token inspector (`lookup_self`).
+    pub token_details: Option<TokenInfo>,
+    /// Mode to return to when leaving the token inspector.
+    token_return: Mode,
+    /// Transient payload shown in the token inspector pane.
+    token_pane: Option<TokenPane>,
+    /// Child-token parameters accumulated across the chained prompts.
+    child_draft: Option<ChildTokenDraft>,
+    /// Parsed wrap payload awaiting a TTL.
+    wrap_payload: Option<Value>,
+    /// Token may create child tokens (`auth/token/create`).
+    pub token_can_create: bool,
+    /// Token may wrap data (`sys/wrapping/wrap`).
+    pub token_can_wrap: bool,
+    /// Whether the token capability probe has resolved (gating fails closed until then).
+    token_caps_loaded: bool,
+    /// Active `:` command line, if any.
+    pub command_line: Option<CommandLineState>,
+    /// Selected row in the policies view.
+    pub policies_selected: usize,
+    /// Current selected policy write capability.
+    pub policy_can_write: bool,
+    pending_policy_edit: Option<String>,
+    pending_policy_new: Option<String>,
+    pending_policy_save: Option<PendingPolicySave>,
+    policy_preview_error: Option<(String, String)>,
+    /// Pending editor handoff request consumed by terminal owner.
+    pub editor_request: Option<EditorRequest>,
     modal_addr: String,
     modal_token: String,
     modal_focus: ModalField,
@@ -324,6 +433,22 @@ impl<V: VaultApi + 'static> App<V> {
                 prompt: None,
                 overlay: None,
                 filter: None,
+                token_details: None,
+                token_return: Mode::Engines,
+                token_pane: None,
+                child_draft: None,
+                wrap_payload: None,
+                token_can_create: false,
+                token_can_wrap: false,
+                token_caps_loaded: false,
+                command_line: None,
+                policies_selected: 0,
+                policy_can_write: false,
+                pending_policy_edit: None,
+                pending_policy_new: None,
+                pending_policy_save: None,
+                policy_preview_error: None,
+                editor_request: None,
                 modal_addr: String::new(),
                 modal_token: String::new(),
                 modal_focus: ModalField::Addr,
@@ -434,6 +559,9 @@ impl<V: VaultApi + 'static> App<V> {
         if self.prompt.is_some() {
             return self.handle_prompt_input(key);
         }
+        if self.command_line.is_some() {
+            return self.handle_command_line_input(key);
+        }
         if self.overlay.is_some() {
             return self.handle_overlay_input(key);
         }
@@ -452,10 +580,14 @@ impl<V: VaultApi + 'static> App<V> {
         }
         if matches!(self.state, AppState::Main(_)) && !self.inside_secret_editor() {
             if key.code == KeyCode::Char(':') {
-                self.open_command_palette();
+                self.open_command_prompt();
                 return false;
             }
-            if key.code == KeyCode::Char('/') && !matches!(self.state, AppState::Main(Mode::Config))
+            if key.code == KeyCode::Char('/')
+                && matches!(
+                    self.state,
+                    AppState::Main(Mode::Engines | Mode::Secrets | Mode::SecretData)
+                )
             {
                 self.open_filter();
                 return false;
@@ -466,7 +598,9 @@ impl<V: VaultApi + 'static> App<V> {
             AppState::Main(Mode::Config) => false,
             AppState::Main(Mode::Engines) => self.handle_engines_input(key),
             AppState::Main(Mode::Secrets) => self.handle_secrets_input(key),
+            AppState::Main(Mode::Policies) => self.handle_policies_input(key),
             AppState::Main(Mode::SecretData) => self.handle_secret_data_input(key),
+            AppState::Main(Mode::Token) => self.handle_token_input(key),
         }
     }
 
@@ -615,7 +749,8 @@ impl<V: VaultApi + 'static> App<V> {
                     path,
                 }
             }
-            AppState::ConfigInput | AppState::Main(Mode::Config | Mode::Engines) => {
+            AppState::ConfigInput
+            | AppState::Main(Mode::Config | Mode::Engines | Mode::Policies | Mode::Token) => {
                 FilterScope::Engines
             }
         }
@@ -677,7 +812,8 @@ impl<V: VaultApi + 'static> App<V> {
                     ui.selected = 0;
                 }
             }
-            AppState::ConfigInput | AppState::Main(Mode::Config) => {}
+            AppState::ConfigInput
+            | AppState::Main(Mode::Config | Mode::Policies | Mode::Token) => {}
         }
     }
 
@@ -738,7 +874,9 @@ impl<V: VaultApi + 'static> App<V> {
                 let total = self.secret_data.as_ref().map_or(0, |ui| ui.data.data.len());
                 (self.filtered_data_keys().len(), total)
             }
-            AppState::ConfigInput | AppState::Main(Mode::Config) => (0, 0),
+            AppState::ConfigInput | AppState::Main(Mode::Config | Mode::Policies | Mode::Token) => {
+                (0, 0)
+            }
         }
     }
 
@@ -778,8 +916,16 @@ impl<V: VaultApi + 'static> App<V> {
     }
 
     /// Folds a background message into app/store state.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single fold point for all Msg variants by architecture"
+    )]
     pub fn apply(&mut self, msg: Msg) {
         self.pending = false;
+        if self.apply_token_event(&msg) {
+            let _accepted = self.store.apply(msg);
+            return;
+        }
         match &msg {
             Msg::HealthLoaded { info, .. } => self.apply_health(info),
             Msg::TokenLoaded { info, .. } => self.apply_token(info),
@@ -816,9 +962,19 @@ impl<V: VaultApi + 'static> App<V> {
             Msg::Capabilities { .. }
             | Msg::EnginesLoaded { .. }
             | Msg::SecretsLoaded { .. }
-            | Msg::HardRefreshed { .. } => {}
+            | Msg::HardRefreshed { .. }
+            | Msg::TokenRenewed { .. }
+            | Msg::TokenMinted { .. }
+            | Msg::DataWrapped { .. }
+            | Msg::DataUnwrapped { .. }
+            | Msg::TokenCapabilities { .. }
+            | Msg::PoliciesLoaded { .. }
+            | Msg::PolicyLoaded { .. }
+            | Msg::PolicyWritten { .. }
+            | Msg::PolicyCapabilities { .. } => {}
         }
 
+        let policy_effect = policy_effect(&msg);
         let mut cache_msg = msg;
         let capability_update = match &cache_msg {
             Msg::Capabilities {
@@ -832,12 +988,153 @@ impl<V: VaultApi + 'static> App<V> {
             sort_entries(entries);
         }
         let accepted = self.store.apply(cache_msg);
-        if accepted {
-            if let Some((writable, deletable)) = capability_update {
-                self.can_write = writable;
-                self.can_delete = deletable;
+        if !accepted {
+            return;
+        }
+        if let Some((writable, deletable)) = capability_update {
+            self.can_write = writable;
+            self.can_delete = deletable;
+        }
+        if let Some(effect) = policy_effect {
+            self.apply_policy_effect(effect);
+        }
+    }
+
+    // Applies the policy side effects of an accepted message. Runs after the store
+    // fold so it acts on fresh state (`Msg::PoliciesLoaded` must populate the list
+    // before its selected preview/capability loads are spawned), and a stale
+    // message cannot open the editor or clear pending save state.
+    fn apply_policy_effect(&mut self, effect: PolicyEffect) {
+        match effect {
+            PolicyEffect::PoliciesLoaded => {
+                self.policy_can_write = false;
+                self.policy_preview_error = None;
+                self.pending_policy_edit = None;
+                self.sync_policy_selection();
+                self.spawn_selected_policy_load();
+                self.spawn_selected_policy_capabilities();
+            }
+            PolicyEffect::PolicyLoaded(name) => {
+                if self
+                    .policy_preview_error
+                    .as_ref()
+                    .is_some_and(|(policy_name, _)| policy_name == &name)
+                {
+                    self.policy_preview_error = None;
+                }
+                let pending = self.pending_policy_edit.as_deref() == Some(name.as_str());
+                let selected = self.selected_policy_name().as_deref() == Some(name.as_str());
+                if pending && selected {
+                    self.pending_policy_edit = None;
+                    if let Some(policy) = self
+                        .store
+                        .policy_document(&name)
+                        .map(|document| document.policy.clone())
+                    {
+                        self.editor_request = Some(EditorRequest {
+                            target: EditorTarget::Policy {
+                                name: name.clone(),
+                                original_policy: policy.clone(),
+                            },
+                            buffer: EditBuffer {
+                                initial_text: policy,
+                                file_stem: name,
+                                extension: ".hcl",
+                            },
+                        });
+                    }
+                }
+            }
+            PolicyEffect::PolicyWritten(name) => {
+                self.pending_policy_save = None;
+                self.set_status(StatusKind::Success, format!("policy '{name}' saved"));
+                self.spawn_load_policies();
+                self.spawn_load_policy(name);
+            }
+            PolicyEffect::PolicyCapabilities { name, writable } => {
+                if self.selected_policy_name().as_deref() == Some(name.as_str()) {
+                    self.policy_can_write = writable;
+                }
+                if self.pending_policy_new.as_deref() == Some(name.as_str()) {
+                    let policy_name = name;
+                    self.pending_policy_new = None;
+                    if writable {
+                        self.editor_request = Some(EditorRequest {
+                            target: EditorTarget::Policy {
+                                name: policy_name.clone(),
+                                original_policy: String::new(),
+                            },
+                            buffer: EditBuffer {
+                                initial_text: String::new(),
+                                file_stem: policy_name,
+                                extension: ".hcl",
+                            },
+                        });
+                    } else {
+                        self.set_status(StatusKind::Error, "no permission to edit policy");
+                    }
+                }
             }
         }
+    }
+
+    /// Applies token-inspector messages, returning true when one was handled.
+    ///
+    /// Token results and the capability probe are generation-checked here so a
+    /// stale response can never overwrite newer UI state or reopen a gated action.
+    fn apply_token_event(&mut self, msg: &Msg) -> bool {
+        let current = self.store.generation();
+        match msg {
+            Msg::TokenRenewed { generation } => {
+                if *generation == current {
+                    self.set_status(StatusKind::Success, "token renewed");
+                    self.spawn_read_token(current);
+                }
+            }
+            Msg::TokenMinted { generation, minted } => {
+                if *generation == current {
+                    self.token_pane = Some(TokenPane::Minted(minted.clone()));
+                    self.set_status(
+                        StatusKind::Success,
+                        "child token created - press c to copy it now",
+                    );
+                }
+            }
+            Msg::DataWrapped {
+                generation,
+                wrapped,
+            } => {
+                if *generation == current {
+                    self.token_pane = Some(TokenPane::Wrapped(wrapped.clone()));
+                    self.set_status(
+                        StatusKind::Success,
+                        "data wrapped - press c to copy the token now",
+                    );
+                }
+            }
+            Msg::DataUnwrapped {
+                generation,
+                payload,
+            } => {
+                if *generation == current {
+                    self.token_pane = Some(TokenPane::Unwrapped(payload.clone()));
+                    self.set_status(StatusKind::Success, "wrapping token unwrapped");
+                }
+            }
+            Msg::TokenCapabilities {
+                generation,
+                can_create,
+                can_wrap,
+            } => {
+                if *generation == current {
+                    self.token_can_create = *can_create;
+                    self.token_can_wrap = *can_wrap;
+                    self.token_caps_loaded = true;
+                }
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// Handles a failed background operation. A failed secret read while the
@@ -855,6 +1152,11 @@ impl<V: VaultApi + 'static> App<V> {
                 self.secret_data = None;
                 self.state = AppState::Main(Mode::Secrets);
             }
+        }
+        if self.state == AppState::Main(Mode::Policies)
+            && let Some(name) = self.selected_policy_name()
+        {
+            self.policy_preview_error = Some((name, message.to_owned()));
         }
         self.set_status(StatusKind::Error, message);
     }
@@ -890,6 +1192,8 @@ impl<V: VaultApi + 'static> App<V> {
         Permission {
             write: self.can_write,
             delete: self.can_delete,
+            create_token: self.token_can_create,
+            wrap: self.token_can_wrap,
         }
     }
 
@@ -899,7 +1203,9 @@ impl<V: VaultApi + 'static> App<V> {
             AppState::ConfigInput | AppState::Main(Mode::Config) => Page::Config,
             AppState::Main(Mode::Engines) => Page::Engines,
             AppState::Main(Mode::Secrets) => Page::Secrets,
+            AppState::Main(Mode::Policies) => Page::Policies,
             AppState::Main(Mode::SecretData) => Page::SecretData,
+            AppState::Main(Mode::Token) => Page::Token,
         }
     }
 
@@ -967,6 +1273,47 @@ impl<V: VaultApi + 'static> App<V> {
         })
     }
 
+    /// Builds the pure policies render model.
+    pub fn policies_model(&self) -> PoliciesModel {
+        let entries = self.store.policies().to_vec();
+        let preview = if entries.is_empty() {
+            PolicyPreview::Empty
+        } else if let Some(name) = self.selected_policy_name() {
+            if let Some(document) = self.store.policy_document(&name) {
+                PolicyPreview::Loaded {
+                    name,
+                    policy: document.policy.clone(),
+                }
+            } else if let Some((error_name, message)) = &self.policy_preview_error {
+                if error_name == &name {
+                    PolicyPreview::Error {
+                        name,
+                        message: message.clone(),
+                    }
+                } else {
+                    PolicyPreview::Loading { name }
+                }
+            } else {
+                PolicyPreview::Loading { name }
+            }
+        } else {
+            PolicyPreview::Empty
+        };
+        PoliciesModel {
+            entries,
+            selected: self.policies_selected,
+            preview,
+        }
+    }
+
+    /// Builds the pure command-line render model.
+    pub fn command_line_model(&self) -> Option<CommandLineModel> {
+        self.command_line.as_ref().map(|state| CommandLineModel {
+            input: state.input.clone(),
+            error: state.error.clone(),
+        })
+    }
+
     /// Builds a pure modal render model.
     pub fn modal_model(&self, addr: String, token: String, focus: ModalField) -> ModalModel {
         ModalModel {
@@ -975,6 +1322,51 @@ impl<V: VaultApi + 'static> App<V> {
             focus,
             error: self.modal_error.clone(),
         }
+    }
+
+    /// Builds the pure token inspector render model.
+    pub fn token_model(&self) -> TokenViewModel {
+        let details = self.token_details.clone().unwrap_or_default();
+        TokenViewModel {
+            loaded: self.token_details.is_some(),
+            accessor: value_or_na(&details.accessor),
+            display_name: value_or_na(&details.display_name),
+            policies: if details.policies.is_empty() {
+                NA_VALUE.to_owned()
+            } else {
+                details.policies.join(", ")
+            },
+            ttl: ttl_text(details.ttl),
+            expire_time: details
+                .expire_time
+                .clone()
+                .unwrap_or_else(|| "never".to_owned()),
+            renewable: details.renewable,
+            num_uses: uses_text(details.num_uses),
+            orphan: details.orphan,
+            pane: self.token_pane_model(),
+        }
+    }
+
+    fn token_pane_model(&self) -> Option<PaneModel> {
+        let pane = self.token_pane.as_ref()?;
+        Some(match pane {
+            TokenPane::Minted(minted) => PaneModel {
+                title: "New Token (shown once)".to_owned(),
+                warning: Some("copy now - this token is never shown again".to_owned()),
+                body: minted.token.expose_secret().to_owned(),
+            },
+            TokenPane::Wrapped(wrapped) => PaneModel {
+                title: "Wrapping Token (shown once)".to_owned(),
+                warning: Some("copy now - this wrapping token is single-use".to_owned()),
+                body: wrapped.token.expose_secret().to_owned(),
+            },
+            TokenPane::Unwrapped(payload) => PaneModel {
+                title: "Unwrapped Payload".to_owned(),
+                warning: None,
+                body: payload.clone(),
+            },
+        })
     }
 
     /// Draws the complete app surface.
@@ -991,14 +1383,18 @@ impl<V: VaultApi + 'static> App<V> {
             return;
         };
         draw_header(frame, *header_area, &self.header_model(), &self.theme);
-        draw_commands_with_input(
-            frame,
-            *commands_area,
-            self.commands_page(),
-            self.permission(),
-            self.command_bar_input(),
-            &self.theme,
-        );
+        if let Some(model) = self.command_line_model() {
+            draw_command_line(frame, *commands_area, &model, &self.theme);
+        } else {
+            draw_commands_with_input(
+                frame,
+                *commands_area,
+                self.commands_page(),
+                self.permission(),
+                self.command_bar_input(),
+                &self.theme,
+            );
+        }
         match self.state {
             AppState::ConfigInput => draw_modal(
                 frame,
@@ -1017,10 +1413,16 @@ impl<V: VaultApi + 'static> App<V> {
             AppState::Main(Mode::Secrets) => {
                 draw_secrets(frame, *body_area, &self.secrets_model(), &self.theme);
             }
+            AppState::Main(Mode::Policies) => {
+                draw_policies(frame, *body_area, &self.policies_model(), &self.theme);
+            }
             AppState::Main(Mode::SecretData) => {
                 if let Some(model) = self.secret_data_model() {
                     draw_secret_data(frame, *body_area, &model, &self.theme);
                 }
+            }
+            AppState::Main(Mode::Token) => {
+                draw_token(frame, *body_area, &self.token_model(), &self.theme);
             }
         }
         if let Some(prompt) = &self.prompt {
@@ -1028,6 +1430,7 @@ impl<V: VaultApi + 'static> App<V> {
                 kind: prompt.kind,
                 input: prompt.input.clone(),
                 error: prompt.error.clone(),
+                detail: prompt.detail.clone(),
             };
             draw_prompt(frame, *body_area, &model, &self.theme);
         }
@@ -1200,6 +1603,52 @@ impl<V: VaultApi + 'static> App<V> {
         }
     }
 
+    fn handle_policies_input(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.state = AppState::Main(Mode::Engines);
+                false
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.policies_selected = self.policies_selected.saturating_sub(1);
+                self.policy_can_write = false;
+                self.policy_preview_error = None;
+                self.pending_policy_edit = None;
+                self.spawn_selected_policy_load();
+                self.spawn_selected_policy_capabilities();
+                false
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.policies_selected =
+                    next_index(self.policies_selected, self.store.policies().len());
+                self.policy_can_write = false;
+                self.policy_preview_error = None;
+                self.pending_policy_edit = None;
+                self.spawn_selected_policy_load();
+                self.spawn_selected_policy_capabilities();
+                false
+            }
+            KeyCode::Enter => {
+                self.spawn_selected_policy_load();
+                false
+            }
+            KeyCode::Char('e') => {
+                self.edit_selected_policy();
+                false
+            }
+            KeyCode::Char('n') => {
+                self.prompt = Some(PromptState {
+                    kind: PromptKind::NewPolicy,
+                    input: String::new(),
+                    error: None,
+                    detail: None,
+                });
+                false
+            }
+            _ => false,
+        }
+    }
+
     fn handle_secret_data_input(&mut self, key: KeyEvent) -> bool {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
             self.save_secret();
@@ -1277,6 +1726,312 @@ impl<V: VaultApi + 'static> App<V> {
             | KeyCode::Media(_)
             | KeyCode::Modifier(_) => false,
         }
+    }
+
+    fn handle_token_input(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => self.leave_token_view(),
+            KeyCode::Char('r') => self.spawn_renew_token(),
+            KeyCode::Char('n') => self.open_child_token_prompt(),
+            KeyCode::Char('w') => self.open_wrap_prompt(),
+            KeyCode::Char('u') => self.open_unwrap_prompt(),
+            KeyCode::Char('c') => self.copy_token_pane(),
+            _ => {}
+        }
+        false
+    }
+
+    /// Leaves the token inspector, discarding any minted/wrapping token shown so
+    /// it is never displayed again (the "shown once" contract).
+    fn leave_token_view(&mut self) {
+        self.token_pane = None;
+        self.child_draft = None;
+        self.wrap_payload = None;
+        self.state = AppState::Main(self.token_return);
+    }
+
+    fn open_token_view(&mut self) {
+        let current = match &self.state {
+            AppState::Main(mode) => *mode,
+            AppState::ConfigInput => Mode::Config,
+        };
+        if current != Mode::Token {
+            self.token_return = current;
+        }
+        self.state = AppState::Main(Mode::Token);
+        self.token_pane = None;
+        self.child_draft = None;
+        self.wrap_payload = None;
+        self.token_can_create = false;
+        self.token_can_wrap = false;
+        self.token_caps_loaded = false;
+        if self.token_details.is_none() {
+            self.spawn_read_token(self.store.generation());
+        }
+        self.spawn_token_capabilities(self.store.generation());
+    }
+
+    fn open_command_prompt(&mut self) {
+        self.open_command_palette();
+        self.command_line = Some(CommandLineState {
+            input: String::new(),
+            error: None,
+        });
+        self.prompt = Some(PromptState {
+            kind: PromptKind::Command,
+            input: String::new(),
+            error: None,
+            detail: None,
+        });
+    }
+
+    fn open_child_token_prompt(&mut self) {
+        if self.token_caps_loaded && !self.token_can_create {
+            self.set_status(StatusKind::Error, "no permission to create child tokens");
+            return;
+        }
+        self.child_draft = Some(ChildTokenDraft::default());
+        self.next_prompt(PromptKind::ChildTokenPolicies);
+    }
+
+    fn open_wrap_prompt(&mut self) {
+        if self.token_caps_loaded && !self.token_can_wrap {
+            self.set_status(StatusKind::Error, "no permission to wrap data");
+            return;
+        }
+        self.next_prompt(PromptKind::WrapPayload);
+    }
+
+    fn open_unwrap_prompt(&mut self) {
+        self.next_prompt(PromptKind::UnwrapToken);
+    }
+
+    fn next_prompt(&mut self, kind: PromptKind) {
+        self.prompt = Some(PromptState {
+            kind,
+            input: String::new(),
+            error: None,
+            detail: None,
+        });
+    }
+
+    fn reopen_prompt(&mut self, kind: PromptKind, error: impl Into<String>) {
+        let message = error.into();
+        if kind == PromptKind::Command {
+            self.command_line = Some(CommandLineState {
+                input: String::new(),
+                error: Some(message.clone()),
+            });
+        }
+        self.prompt = Some(PromptState {
+            kind,
+            input: String::new(),
+            error: Some(message),
+            detail: None,
+        });
+    }
+
+    fn run_command(&mut self, input: &str) {
+        let command = input.split_whitespace().next().unwrap_or_default();
+        match command {
+            "ctx" | "context" | "contexts" => {
+                self.prompt = None;
+                self.command_line = None;
+                self.open_contexts();
+            }
+            "filter" => {
+                self.prompt = None;
+                self.command_line = None;
+                self.open_filter();
+            }
+            "policies" => {
+                self.prompt = None;
+                self.command_line = None;
+                self.open_policies();
+            }
+            "token" | "t" => self.open_token_view(),
+            "unwrap" | "u" => {
+                self.open_token_view();
+                self.open_unwrap_prompt();
+            }
+            "wrap" | "w" => {
+                self.open_token_view();
+                self.open_wrap_prompt();
+            }
+            other => {
+                let message = if other.is_empty() {
+                    "enter a command: token, unwrap, wrap, policies".to_owned()
+                } else {
+                    format!("unknown command: {other}")
+                };
+                self.reopen_prompt(PromptKind::Command, message);
+            }
+        }
+    }
+
+    fn advance_child_policies(&mut self, input: &str) {
+        let policies = input
+            .split([',', ' '])
+            .filter(|policy| !policy.is_empty())
+            .map(str::to_owned)
+            .collect();
+        self.child_draft = Some(ChildTokenDraft {
+            policies,
+            ttl: None,
+        });
+        self.next_prompt(PromptKind::ChildTokenTtl);
+    }
+
+    fn advance_child_ttl(&mut self, input: &str) {
+        let ttl = if input.is_empty() {
+            None
+        } else {
+            Some(input.to_owned())
+        };
+        if let Some(draft) = self.child_draft.as_mut() {
+            draft.ttl = ttl;
+        }
+        self.next_prompt(PromptKind::ChildTokenUses);
+    }
+
+    fn finish_child_token(&mut self, input: &str) {
+        if !self.token_can_create {
+            self.set_status(StatusKind::Error, "no permission to create child tokens");
+            return;
+        }
+        let num_uses = if input.is_empty() {
+            None
+        } else {
+            let Ok(uses) = input.parse::<u64>() else {
+                self.reopen_prompt(
+                    PromptKind::ChildTokenUses,
+                    "use limit must be a whole number",
+                );
+                return;
+            };
+            Some(uses)
+        };
+        let draft = self.child_draft.take().unwrap_or_default();
+        self.spawn_create_token(TokenCreateRequest {
+            policies: draft.policies,
+            ttl: draft.ttl,
+            num_uses,
+        });
+    }
+
+    fn advance_wrap_payload(&mut self, input: &str) {
+        match serde_json::from_str::<Value>(input) {
+            Ok(payload) => {
+                self.wrap_payload = Some(payload);
+                self.next_prompt(PromptKind::WrapTtl);
+            }
+            Err(_) => self.reopen_prompt(PromptKind::WrapPayload, "payload must be valid JSON"),
+        }
+    }
+
+    fn finish_wrap(&mut self, input: &str) {
+        if !self.token_can_wrap {
+            self.set_status(StatusKind::Error, "no permission to wrap data");
+            return;
+        }
+        let ttl = if input.is_empty() {
+            None
+        } else {
+            Some(input.to_owned())
+        };
+        let payload = self.wrap_payload.take().unwrap_or(Value::Null);
+        self.spawn_wrap(payload, ttl);
+    }
+
+    fn copy_token_pane(&mut self) {
+        let Some(pane) = self.token_pane_model() else {
+            self.set_status(StatusKind::Info, "nothing to copy");
+            return;
+        };
+        match self.clipboard.copy(&pane.body) {
+            Ok(()) => self.set_status(StatusKind::Success, "Copied to clipboard"),
+            Err(err) => self.set_status(StatusKind::Error, err.to_string()),
+        }
+    }
+
+    fn spawn_renew_token(&mut self) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            timed(generation, vault.renew_token_self(), |()| {
+                Msg::TokenRenewed { generation }
+            })
+            .await
+        });
+    }
+
+    fn spawn_create_token(&mut self, request: TokenCreateRequest) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            timed(generation, vault.create_token(&request), |minted| {
+                Msg::TokenMinted { generation, minted }
+            })
+            .await
+        });
+    }
+
+    fn spawn_wrap(&mut self, payload: Value, ttl: Option<String>) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            timed(
+                generation,
+                vault.wrap_data(&payload, ttl.as_deref()),
+                |wrapped| Msg::DataWrapped {
+                    generation,
+                    wrapped,
+                },
+            )
+            .await
+        });
+    }
+
+    fn spawn_unwrap(&mut self, wrapping_token: &str) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        let wrapping_token = wrapping_token.to_owned();
+        self.spawn_msg(self.tx.clone(), async move {
+            timed(generation, vault.unwrap_data(&wrapping_token), |payload| {
+                Msg::DataUnwrapped {
+                    generation,
+                    payload,
+                }
+            })
+            .await
+        });
+    }
+
+    fn spawn_token_capabilities(&self, generation: u64) {
+        let paths = vec![
+            "auth/token/create".to_owned(),
+            "sys/wrapping/wrap".to_owned(),
+        ];
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            let (can_create, can_wrap) =
+                match tokio::time::timeout(TASK_TIMEOUT, vault.capabilities_self(&paths)).await {
+                    Ok(Ok(caps)) => (
+                        caps_allow(&caps, "auth/token/create"),
+                        caps_allow(&caps, "sys/wrapping/wrap"),
+                    ),
+                    _ => (false, false),
+                };
+            Msg::TokenCapabilities {
+                generation,
+                can_create,
+                can_wrap,
+            }
+        });
     }
 
     fn open_selected_engine(&mut self) {
@@ -1487,6 +2242,7 @@ impl<V: VaultApi + 'static> App<V> {
     }
 
     fn apply_token(&mut self, token: &TokenInfo) {
+        self.token_details = Some(token.clone());
         let mut info = self.info.clone().unwrap_or_default();
         info.policies = if token.policies.is_empty() {
             NA_VALUE.to_owned()
@@ -1651,6 +2407,90 @@ impl<V: VaultApi + 'static> App<V> {
         });
     }
 
+    fn spawn_load_policies(&mut self) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            match tokio::time::timeout(TASK_TIMEOUT, vault.list_acl_policies()).await {
+                Ok(Ok(entries)) => Msg::PoliciesLoaded {
+                    generation,
+                    entries,
+                },
+                Ok(Err(err)) => Msg::Failure {
+                    generation,
+                    message: err.message(),
+                },
+                Err(_elapsed) => timeout_msg(generation),
+            }
+        });
+    }
+
+    fn spawn_load_policy(&mut self, name: String) {
+        // Shares the caller's generation: a policy load and the capability probe
+        // spawned in the same navigation step must not supersede each other, or
+        // the load result is dropped as stale (mirrors the KV capability rule).
+        let generation = self.store.generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            match tokio::time::timeout(TASK_TIMEOUT, vault.read_acl_policy(&name)).await {
+                Ok(Ok(document)) => Msg::PolicyLoaded {
+                    generation,
+                    name,
+                    document,
+                },
+                Ok(Err(err)) => Msg::Failure {
+                    generation,
+                    message: err.message(),
+                },
+                Err(_elapsed) => timeout_msg(generation),
+            }
+        });
+    }
+
+    fn spawn_write_policy(&mut self, name: String, policy: String) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            match tokio::time::timeout(TASK_TIMEOUT, vault.write_acl_policy(&name, &policy)).await {
+                Ok(Ok(())) => Msg::PolicyWritten { generation, name },
+                Ok(Err(err)) => Msg::Failure {
+                    generation,
+                    message: err.message(),
+                },
+                Err(_elapsed) => timeout_msg(generation),
+            }
+        });
+    }
+
+    fn spawn_policy_capabilities(&self, name: String) {
+        // Shares the caller's generation (see `spawn_load_policy`).
+        let generation = self.store.generation();
+        let path = format!("sys/policies/acl/{}", encode_acl_policy_name(&name));
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            let writable = match tokio::time::timeout(
+                TASK_TIMEOUT,
+                vault.capabilities_self(std::slice::from_ref(&path)),
+            )
+            .await
+            {
+                Ok(Ok(caps)) => caps.get(&path).is_some_and(|list| {
+                    let has = |cap: &str| list.iter().any(|entry| entry == cap);
+                    has("root") || has("create") || has("update")
+                }),
+                _ => false,
+            };
+            Msg::PolicyCapabilities {
+                generation,
+                name,
+                writable,
+            }
+        });
+    }
+
     fn open_new_secret_prompt(&mut self) {
         if !self.can_write {
             self.set_status(StatusKind::Error, "no permission to create secrets here");
@@ -1660,6 +2500,7 @@ impl<V: VaultApi + 'static> App<V> {
             kind: PromptKind::NewSecret,
             input: String::new(),
             error: None,
+            detail: None,
         });
     }
 
@@ -1670,8 +2511,6 @@ impl<V: VaultApi + 'static> App<V> {
         )
     }
 
-    /// Opens the delete confirmation for the selected leaf entry (directories
-    /// are virtual in KV2 — their secrets must be removed individually).
     fn open_delete_secret_prompt(&mut self) {
         if !self.can_delete {
             self.set_status(StatusKind::Error, "no permission to delete secrets here");
@@ -1692,6 +2531,7 @@ impl<V: VaultApi + 'static> App<V> {
             kind: PromptKind::DeleteSecret,
             input: entry.name.as_str().to_owned(),
             error: None,
+            detail: None,
         });
     }
 
@@ -1729,23 +2569,50 @@ impl<V: VaultApi + 'static> App<V> {
             kind: PromptKind::NewKey,
             input: String::new(),
             error: None,
+            detail: None,
         });
     }
 
     #[must_use]
     fn handle_prompt_input(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Esc => self.prompt = None,
+            KeyCode::Esc => {
+                if self
+                    .prompt
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.kind == PromptKind::SavePolicy)
+                {
+                    self.pending_policy_save = None;
+                    self.set_status(StatusKind::Info, "policy save cancelled");
+                }
+                self.prompt = None;
+                self.command_line = None;
+                self.child_draft = None;
+                self.wrap_payload = None;
+            }
             KeyCode::Enter => self.submit_prompt(),
             KeyCode::Backspace => {
                 if let Some(prompt) = self.prompt.as_mut() {
                     prompt.input.pop();
+                    if prompt.kind == PromptKind::Command {
+                        if let Some(command_line) = self.command_line.as_mut() {
+                            command_line.input.pop();
+                        }
+                    }
                 }
             }
             KeyCode::Char(ch) => {
                 if let Some(prompt) = self.prompt.as_mut() {
-                    if prompt.kind != PromptKind::DeleteSecret {
+                    if !matches!(
+                        prompt.kind,
+                        PromptKind::DeleteSecret | PromptKind::SavePolicy
+                    ) {
                         prompt.input.push(ch);
+                        if prompt.kind == PromptKind::Command {
+                            if let Some(command_line) = self.command_line.as_mut() {
+                                command_line.input.push(ch);
+                            }
+                        }
                     }
                 }
             }
@@ -1758,16 +2625,41 @@ impl<V: VaultApi + 'static> App<V> {
         let Some(mut prompt) = self.prompt.take() else {
             return;
         };
-        let name = prompt.input.trim().to_owned();
-        if name.is_empty() {
-            prompt.error = Some("name cannot be empty".to_owned());
+        if prompt.kind == PromptKind::SavePolicy {
+            let name = prompt.input.trim().to_owned();
+            if name.is_empty() {
+                prompt.error = Some("name cannot be empty".to_owned());
+                self.prompt = Some(prompt);
+                return;
+            }
+            self.save_policy(&name);
+            return;
+        }
+        let input = prompt.input.trim().to_owned();
+        if prompt.kind.requires_input() && input.is_empty() {
+            prompt.error = Some(empty_prompt_message(prompt.kind).to_owned());
             self.prompt = Some(prompt);
             return;
         }
         match prompt.kind {
-            PromptKind::NewSecret => self.create_secret(&name),
-            PromptKind::NewKey => self.add_key(&name),
-            PromptKind::DeleteSecret => self.delete_secret(&name),
+            PromptKind::Command => {
+                self.command_line = Some(CommandLineState {
+                    input: input.clone(),
+                    error: None,
+                });
+                self.run_command(&input);
+            }
+            PromptKind::NewSecret => self.create_secret(&input),
+            PromptKind::NewKey => self.add_key(&input),
+            PromptKind::DeleteSecret => self.delete_secret(&input),
+            PromptKind::ChildTokenPolicies => self.advance_child_policies(&input),
+            PromptKind::ChildTokenTtl => self.advance_child_ttl(&input),
+            PromptKind::ChildTokenUses => self.finish_child_token(&input),
+            PromptKind::WrapPayload => self.advance_wrap_payload(&input),
+            PromptKind::WrapTtl => self.finish_wrap(&input),
+            PromptKind::UnwrapToken => self.spawn_unwrap(&input),
+            PromptKind::NewPolicy => self.create_policy(&input),
+            PromptKind::SavePolicy => unreachable!("handled above"),
         }
     }
 
@@ -1797,6 +2689,7 @@ impl<V: VaultApi + 'static> App<V> {
                 kind: PromptKind::NewKey,
                 input: name.to_owned(),
                 error: Some("key already exists".to_owned()),
+                detail: None,
             });
             return;
         }
@@ -1812,6 +2705,30 @@ impl<V: VaultApi + 'static> App<V> {
             StatusKind::Info,
             format!("key '{name}' added - type a value and Ctrl+S to save"),
         );
+    }
+
+    fn create_policy(&mut self, name: &str) {
+        if let Err(message) = validate_policy_name(name) {
+            self.prompt = Some(PromptState {
+                kind: PromptKind::NewPolicy,
+                input: name.to_owned(),
+                error: Some(message),
+                detail: None,
+            });
+            return;
+        }
+        self.pending_policy_new = Some(name.to_owned());
+        self.spawn_policy_capabilities(name.to_owned());
+    }
+
+    fn save_policy(&mut self, name: &str) {
+        let Some(pending) = &self.pending_policy_save else {
+            return;
+        };
+        if pending.name != name {
+            return;
+        }
+        self.spawn_write_policy(pending.name.clone(), pending.new_policy.clone());
     }
 
     fn spawn_create_secret(&mut self, key: CacheKey) {
@@ -1860,6 +2777,192 @@ impl<V: VaultApi + 'static> App<V> {
             }
         });
     }
+
+    fn handle_command_line_input(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => self.command_line = None,
+            KeyCode::Backspace => {
+                if let Some(command_line) = self.command_line.as_mut() {
+                    command_line.input.pop();
+                }
+            }
+            KeyCode::Enter => self.submit_command_line(),
+            KeyCode::Char(ch) => {
+                if let Some(command_line) = self.command_line.as_mut() {
+                    command_line.input.push(ch);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn submit_command_line(&mut self) {
+        let Some(input) = self.command_line.as_ref().map(|state| state.input.clone()) else {
+            return;
+        };
+        let command = input.trim().to_owned();
+        if command.is_empty() {
+            self.command_line = None;
+            self.prompt = None;
+            self.overlay = None;
+            return;
+        }
+        self.overlay = None;
+        match command.as_str() {
+            "ctx" | "context" | "contexts" => {
+                self.command_line = None;
+                self.open_contexts();
+            }
+            "filter" => {
+                self.command_line = None;
+                self.open_filter();
+            }
+            "policies" => self.open_policies(),
+            "token" | "t" => {
+                self.command_line = None;
+                self.open_token_view();
+            }
+            "unwrap" | "u" => {
+                self.command_line = None;
+                self.open_token_view();
+                self.open_unwrap_prompt();
+            }
+            "wrap" | "w" => {
+                self.command_line = None;
+                self.open_token_view();
+                self.open_wrap_prompt();
+            }
+            other => {
+                let message = format!("unknown command: {other}");
+                self.command_line = Some(CommandLineState {
+                    input: input.clone(),
+                    error: Some(message.clone()),
+                });
+                self.prompt = Some(PromptState {
+                    kind: PromptKind::Command,
+                    input,
+                    error: Some(message),
+                    detail: None,
+                });
+            }
+        }
+    }
+
+    fn open_policies(&mut self) {
+        self.command_line = None;
+        self.state = AppState::Main(Mode::Policies);
+        self.policies_selected = 0;
+        self.policy_can_write = false;
+        self.pending_policy_edit = None;
+        if self.store.policies().is_empty() {
+            self.spawn_load_policies();
+        } else {
+            self.sync_policy_selection();
+            self.spawn_selected_policy_load();
+            self.spawn_selected_policy_capabilities();
+        }
+    }
+
+    fn sync_policy_selection(&mut self) {
+        let len = self.store.policies().len();
+        if len == 0 {
+            self.policies_selected = 0;
+            return;
+        }
+        self.policies_selected = self.policies_selected.min(len - 1);
+    }
+
+    fn selected_policy_name(&self) -> Option<String> {
+        self.store
+            .policies()
+            .get(self.policies_selected)
+            .map(|entry| entry.name.clone())
+    }
+
+    fn spawn_selected_policy_load(&mut self) {
+        if let Some(name) = self.selected_policy_name() {
+            if self.store.policy_document(&name).is_none() {
+                self.spawn_load_policy(name);
+            }
+        }
+    }
+
+    fn spawn_selected_policy_capabilities(&self) {
+        if let Some(name) = self.selected_policy_name() {
+            self.spawn_policy_capabilities(name);
+        }
+    }
+
+    fn edit_selected_policy(&mut self) {
+        let Some(name) = self.selected_policy_name() else {
+            return;
+        };
+        if !self.policy_can_write {
+            self.set_status(StatusKind::Error, "no permission to edit policy");
+            return;
+        }
+        if let Some(document) = self.store.policy_document(&name) {
+            self.editor_request = Some(EditorRequest {
+                target: EditorTarget::Policy {
+                    name: name.clone(),
+                    original_policy: document.policy.clone(),
+                },
+                buffer: EditBuffer {
+                    initial_text: document.policy.clone(),
+                    file_stem: name,
+                    extension: ".hcl",
+                },
+            });
+            return;
+        }
+        self.pending_policy_edit = Some(name.clone());
+        self.set_status(
+            StatusKind::Info,
+            format!("loading policy '{name}' before editing"),
+        );
+        self.spawn_load_policy(name);
+    }
+
+    /// Takes the next pending editor request.
+    #[allow(
+        clippy::missing_const_for_fn,
+        reason = "const qualification is not important for this mutable state accessor"
+    )]
+    pub fn take_editor_request(&mut self) -> Option<EditorRequest> {
+        self.editor_request.take()
+    }
+
+    /// Completes an editor request and updates UI state from the edit outcome.
+    pub fn complete_editor_request(
+        &mut self,
+        request: EditorRequest,
+        result: Result<EditOutcome, EditorError>,
+    ) {
+        match result {
+            Err(error) => self.set_status(StatusKind::Error, error.to_string()),
+            Ok(EditOutcome::Unchanged) => self.set_status(StatusKind::Info, "No changes to save"),
+            Ok(EditOutcome::Changed(text)) => match request.target {
+                EditorTarget::Policy {
+                    name,
+                    original_policy,
+                } => {
+                    let detail = format_policy_save_detail(&original_policy, &text);
+                    self.pending_policy_save = Some(PendingPolicySave {
+                        name: name.clone(),
+                        old_policy: original_policy,
+                        new_policy: text,
+                    });
+                    self.prompt = Some(PromptState {
+                        kind: PromptKind::SavePolicy,
+                        input: name,
+                        error: None,
+                        detail: Some(detail),
+                    });
+                }
+            },
+        }
+    }
 }
 
 async fn timed<T>(
@@ -1877,6 +2980,50 @@ async fn timed<T>(
     }
 }
 
+fn policy_effect(msg: &Msg) -> Option<PolicyEffect> {
+    match msg {
+        Msg::PoliciesLoaded { .. } => Some(PolicyEffect::PoliciesLoaded),
+        Msg::PolicyLoaded { name, .. } => Some(PolicyEffect::PolicyLoaded(name.clone())),
+        Msg::PolicyWritten { name, .. } => Some(PolicyEffect::PolicyWritten(name.clone())),
+        Msg::PolicyCapabilities { name, writable, .. } => Some(PolicyEffect::PolicyCapabilities {
+            name: name.clone(),
+            writable: *writable,
+        }),
+        _ => None,
+    }
+}
+
+fn validate_policy_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("name cannot be empty".to_owned());
+    }
+    if name.contains('/') {
+        return Err("name must not contain '/'".to_owned());
+    }
+    if name.contains('\n') || name.contains('\r') {
+        return Err("name must not contain newlines".to_owned());
+    }
+    Ok(())
+}
+
+fn format_policy_save_detail(old_policy: &str, new_policy: &str) -> String {
+    format!(
+        "{} bytes / {} lines → {} bytes / {} lines",
+        old_policy.len(),
+        line_count(old_policy),
+        new_policy.len(),
+        line_count(new_policy)
+    )
+}
+
+fn line_count(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        text.lines().count()
+    }
+}
+
 fn timeout_msg(generation: u64) -> Msg {
     Msg::Failure {
         generation,
@@ -1891,6 +3038,46 @@ fn next_index(current: usize, len: usize) -> usize {
 
 fn secret_updated_text(path: &str) -> String {
     format!("Secret '{path}' updated successfully")
+}
+
+const fn empty_prompt_message(kind: PromptKind) -> &'static str {
+    match kind {
+        PromptKind::NewSecret | PromptKind::NewKey => "name cannot be empty",
+        _ => "input cannot be empty",
+    }
+}
+
+fn value_or_na(value: &str) -> String {
+    if value.is_empty() {
+        NA_VALUE.to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
+fn ttl_text(seconds: u64) -> String {
+    if seconds == 0 {
+        return "none".to_owned();
+    }
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+    format!("{hours}h {minutes}m {secs}s")
+}
+
+fn uses_text(uses: u64) -> String {
+    if uses == 0 {
+        "unlimited".to_owned()
+    } else {
+        uses.to_string()
+    }
+}
+
+fn caps_allow(caps: &BTreeMap<String, Vec<String>>, path: &str) -> bool {
+    caps.get(path).is_some_and(|list| {
+        list.iter()
+            .any(|cap| matches!(cap.as_str(), "create" | "update" | "root"))
+    })
 }
 
 #[cfg(test)]
@@ -1911,14 +3098,17 @@ mod tests {
 
     use super::*;
     use crate::clipboard::ClipboardError;
-    use crate::model::KvMetadata;
+    use crate::model::{KvMetadata, PolicyDocument, PolicyEntry};
     use crate::vault::VaultApi;
 
     #[derive(Debug)]
     struct FakeVault {
         engines: Vec<SecretEntry>,
+        policies: Vec<PolicyEntry>,
         listings: Mutex<HashMap<(SecretPath, SecretPath), Vec<SecretEntry>>>,
         data: Mutex<HashMap<(SecretPath, SecretPath), KvData>>,
+        policy_documents: Mutex<HashMap<String, PolicyDocument>>,
+        policy_writes: Mutex<Vec<(String, String)>>,
         writes: Mutex<Vec<WriteRecord>>,
         deletes: Mutex<Vec<(SecretPath, SecretPath)>>,
         writable_all: bool,
@@ -1930,8 +3120,11 @@ mod tests {
         fn default() -> Self {
             Self {
                 engines: Vec::new(),
+                policies: Vec::new(),
                 listings: Mutex::new(HashMap::new()),
                 data: Mutex::new(HashMap::new()),
+                policy_documents: Mutex::new(HashMap::new()),
+                policy_writes: Mutex::new(Vec::new()),
                 writes: Mutex::new(Vec::new()),
                 deletes: Mutex::new(Vec::new()),
                 writable_all: true,
@@ -1943,6 +3136,14 @@ mod tests {
         fn seeded() -> Arc<Self> {
             let vault = Arc::new(Self {
                 engines: vec![SecretEntry::leaf("secret")],
+                policies: vec![
+                    PolicyEntry {
+                        name: "default".to_owned(),
+                    },
+                    PolicyEntry {
+                        name: "team".to_owned(),
+                    },
+                ],
                 ..Self::default()
             });
             vault.insert_listing(
@@ -1960,6 +3161,18 @@ mod tests {
                 SecretPath::new("team/api"),
                 kv_data("old"),
             );
+            vault
+                .policy_documents
+                .lock()
+                .expect("policy documents lock")
+                .insert(
+                    "team".to_owned(),
+                    PolicyDocument {
+                        name: "team".to_owned(),
+                        policy: "path \"secret/data/team/*\" { capabilities = [\"read\"] }"
+                            .to_owned(),
+                    },
+                );
             vault
         }
 
@@ -1979,6 +3192,13 @@ mod tests {
 
         fn writes(&self) -> Vec<WriteRecord> {
             self.writes.lock().expect("writes lock").clone()
+        }
+
+        fn policy_writes(&self) -> Vec<(String, String)> {
+            self.policy_writes
+                .lock()
+                .expect("policy writes lock")
+                .clone()
         }
     }
 
@@ -2074,6 +3294,7 @@ mod tests {
                 Ok(TokenInfo {
                     policies: vec!["root".to_owned()],
                     expire_time: None,
+                    ..TokenInfo::default()
                 })
             }
         }
@@ -2111,6 +3332,92 @@ mod tests {
                         (path, caps)
                     })
                     .collect())
+            }
+        }
+
+        fn renew_token_self(&self) -> impl Future<Output = Result<(), VaultError>> + Send {
+            async move { Ok(()) }
+        }
+
+        fn create_token(
+            &self,
+            request: &TokenCreateRequest,
+        ) -> impl Future<Output = Result<MintedToken, VaultError>> + Send {
+            let policies = request.policies.clone();
+            async move {
+                Ok(MintedToken {
+                    token: SecretString::from("child-token-value"),
+                    accessor: "child-accessor".to_owned(),
+                    policies,
+                    ttl: None,
+                    renewable: false,
+                })
+            }
+        }
+
+        fn wrap_data(
+            &self,
+            _data: &Value,
+            _ttl: Option<&str>,
+        ) -> impl Future<Output = Result<WrappedToken, VaultError>> + Send {
+            async move {
+                Ok(WrappedToken {
+                    token: SecretString::from("wrapping-token-value"),
+                    accessor: "wrap-accessor".to_owned(),
+                    ttl: 300,
+                })
+            }
+        }
+
+        fn unwrap_data(
+            &self,
+            _wrapping_token: &str,
+        ) -> impl Future<Output = Result<String, VaultError>> + Send {
+            async move { Ok("{\n  \"password\": \"hunter2\"\n}".to_owned()) }
+        }
+
+        fn list_acl_policies(
+            &self,
+        ) -> impl Future<Output = Result<Vec<PolicyEntry>, VaultError>> + Send {
+            async move { Ok(self.policies.clone()) }
+        }
+
+        fn read_acl_policy(
+            &self,
+            name: &str,
+        ) -> impl Future<Output = Result<PolicyDocument, VaultError>> + Send {
+            let key = name.to_owned();
+            async move {
+                self.policy_documents
+                    .lock()
+                    .expect("policy documents lock")
+                    .get(&key)
+                    .cloned()
+                    .ok_or_else(|| VaultError::Api {
+                        status: 404,
+                        path: format!("sys/policies/acl/{key}"),
+                        detail: "missing".to_owned(),
+                    })
+            }
+        }
+
+        fn write_acl_policy(
+            &self,
+            name: &str,
+            policy: &str,
+        ) -> impl Future<Output = Result<(), VaultError>> + Send {
+            let name = name.to_owned();
+            let policy = policy.to_owned();
+            async move {
+                self.policy_writes
+                    .lock()
+                    .expect("policy writes lock")
+                    .push((name.clone(), policy.clone()));
+                self.policy_documents
+                    .lock()
+                    .expect("policy documents lock")
+                    .insert(name.clone(), PolicyDocument { name, policy });
+                Ok(())
             }
         }
     }
@@ -2535,6 +3842,321 @@ mod tests {
     }
 
     #[test]
+    fn command_line_switches_to_policies() {
+        let (mut app, _rx, _vault) = test_app();
+        app.handle_input(key(KeyCode::Char(':')));
+        for ch in "policies".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        assert_eq!(app.state, AppState::Main(Mode::Policies));
+        assert!(app.command_line.is_none());
+    }
+
+    #[test]
+    fn command_line_unknown_sets_error() {
+        let (mut app, _rx, _vault) = test_app();
+        app.handle_input(key(KeyCode::Char(':')));
+        app.handle_input(key(KeyCode::Char('x')));
+        app.handle_input(key(KeyCode::Enter));
+        assert_eq!(
+            app.command_line
+                .as_ref()
+                .and_then(|state| state.error.clone()),
+            Some("unknown command: x".to_owned())
+        );
+    }
+
+    #[test]
+    fn colon_in_config_modal_is_typed_not_a_command() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::ConfigInput;
+
+        app.handle_input(key(KeyCode::Char(':')));
+
+        assert!(app.command_line.is_none());
+        assert_eq!(app.modal_addr, ":");
+    }
+
+    #[test]
+    fn policies_model_shows_entries() {
+        let (mut app, _rx, _vault) = test_app();
+        let generation = app.store.bump_generation();
+        app.apply(Msg::PoliciesLoaded {
+            generation,
+            entries: vec![PolicyEntry {
+                name: "default".to_owned(),
+            }],
+        });
+        let model = app.policies_model();
+        assert_eq!(model.entries.len(), 1);
+    }
+
+    #[test]
+    fn policies_enter_triggers_loading_preview_when_missing_cache() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Policies);
+        let generation = app.store.bump_generation();
+        app.apply(Msg::PoliciesLoaded {
+            generation,
+            entries: vec![PolicyEntry {
+                name: "team".to_owned(),
+            }],
+        });
+        app.handle_input(key(KeyCode::Enter));
+        let model = app.policies_model();
+        assert!(matches!(model.preview, PolicyPreview::Loading { .. }));
+    }
+
+    #[test]
+    fn policy_navigation_shares_generation_so_loads_are_not_dropped() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Policies);
+        let generation = app.store.bump_generation();
+        app.apply(Msg::PoliciesLoaded {
+            generation,
+            entries: vec![
+                PolicyEntry {
+                    name: "alpha".to_owned(),
+                },
+                PolicyEntry {
+                    name: "beta".to_owned(),
+                },
+            ],
+        });
+        let before = app.store.generation();
+
+        // When: navigation moves the selection (spawns a load + capability probe).
+        app.handle_input(key(KeyCode::Char('j')));
+
+        // Then: the load/probe rode the current generation instead of bumping, so
+        // the load result is accepted rather than dropped as stale.
+        assert_eq!(app.store.generation(), before);
+        app.apply(Msg::PolicyLoaded {
+            generation: before,
+            name: "beta".to_owned(),
+            document: PolicyDocument {
+                name: "beta".to_owned(),
+                policy: "path \"secret/*\" {}".to_owned(),
+            },
+        });
+        assert!(app.store.policy_document("beta").is_some());
+    }
+
+    #[tokio::test]
+    async fn policies_loaded_spawns_selected_preview_load() {
+        let vault = Arc::new(FakeVault {
+            policies: vec![PolicyEntry {
+                name: "team".to_owned(),
+            }],
+            ..FakeVault::default()
+        });
+        vault
+            .policy_documents
+            .lock()
+            .expect("policy documents lock")
+            .insert(
+                "team".to_owned(),
+                PolicyDocument {
+                    name: "team".to_owned(),
+                    policy: "path \"secret/*\" {}".to_owned(),
+                },
+            );
+        let (mut app, mut rx) = App::new(Config::new("http://vault", "token"), Arc::clone(&vault));
+        app.state = AppState::Main(Mode::Policies);
+
+        let generation = app.store.bump_generation();
+        app.apply(Msg::PoliciesLoaded {
+            generation,
+            entries: vec![PolicyEntry {
+                name: "team".to_owned(),
+            }],
+        });
+
+        // Then: the selected preview load is spawned after the list enters the store.
+        let mut loaded = false;
+        for _ in 0..4 {
+            let Ok(Some(msg)) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
+            else {
+                break;
+            };
+            loaded = matches!(msg, Msg::PolicyLoaded { .. });
+            app.apply(msg);
+            if loaded {
+                break;
+            }
+        }
+        assert!(loaded);
+        assert!(matches!(
+            app.policies_model().preview,
+            PolicyPreview::Loaded { .. }
+        ));
+    }
+
+    #[test]
+    fn late_policy_load_for_unselected_policy_does_not_open_editor() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Policies);
+        let generation = app.store.bump_generation();
+        app.apply(Msg::PoliciesLoaded {
+            generation,
+            entries: vec![
+                PolicyEntry {
+                    name: "alpha".to_owned(),
+                },
+                PolicyEntry {
+                    name: "beta".to_owned(),
+                },
+            ],
+        });
+        app.policy_can_write = true;
+
+        // When: `e` on alpha (document not cached yet) then move to beta.
+        app.handle_input(key(KeyCode::Char('e')));
+        assert!(app.take_editor_request().is_none());
+        app.handle_input(key(KeyCode::Char('j')));
+        assert_eq!(app.selected_policy_name().as_deref(), Some("beta"));
+
+        // Then: alpha's late document load does not open an editor for it.
+        app.apply(Msg::PolicyLoaded {
+            generation,
+            name: "alpha".to_owned(),
+            document: PolicyDocument {
+                name: "alpha".to_owned(),
+                policy: "path \"secret/*\" {}".to_owned(),
+            },
+        });
+        assert!(app.take_editor_request().is_none());
+    }
+
+    #[test]
+    fn edit_without_policy_permission_sets_error_and_no_request() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Policies);
+        app.policy_can_write = false;
+        let generation = app.store.bump_generation();
+        app.apply(Msg::PoliciesLoaded {
+            generation,
+            entries: vec![PolicyEntry {
+                name: "team".to_owned(),
+            }],
+        });
+        app.handle_input(key(KeyCode::Char('e')));
+        assert!(app.take_editor_request().is_none());
+        assert_eq!(app.status.as_ref().map(|s| s.kind), Some(StatusKind::Error));
+    }
+
+    #[test]
+    fn edit_with_cached_policy_emits_editor_request() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Policies);
+        let generation = app.store.bump_generation();
+        app.apply(Msg::PoliciesLoaded {
+            generation,
+            entries: vec![PolicyEntry {
+                name: "team".to_owned(),
+            }],
+        });
+        app.apply(Msg::PolicyLoaded {
+            generation,
+            name: "team".to_owned(),
+            document: PolicyDocument {
+                name: "team".to_owned(),
+                policy: "path \"secret/*\" {}".to_owned(),
+            },
+        });
+        app.policy_can_write = true;
+        app.handle_input(key(KeyCode::Char('e')));
+        let request = app.take_editor_request();
+        assert!(request.is_some());
+        assert_eq!(
+            request.as_ref().map(|value| value.buffer.extension),
+            Some(".hcl")
+        );
+    }
+
+    #[test]
+    fn complete_editor_changed_opens_save_prompt() {
+        let (mut app, _rx, _vault) = test_app();
+        let request = EditorRequest {
+            target: EditorTarget::Policy {
+                name: "team".to_owned(),
+                original_policy: "old".to_owned(),
+            },
+            buffer: EditBuffer {
+                initial_text: "old".to_owned(),
+                file_stem: "team".to_owned(),
+                extension: ".hcl",
+            },
+        };
+        app.complete_editor_request(request, Ok(EditOutcome::Changed("new".to_owned())));
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::SavePolicy)
+        );
+    }
+
+    #[tokio::test]
+    async fn save_policy_confirm_writes_and_sets_success() {
+        let (mut app, mut rx, vault) = test_app();
+        let request = EditorRequest {
+            target: EditorTarget::Policy {
+                name: "team".to_owned(),
+                original_policy: "old".to_owned(),
+            },
+            buffer: EditBuffer {
+                initial_text: "old".to_owned(),
+                file_stem: "team".to_owned(),
+                extension: ".hcl",
+            },
+        };
+        app.complete_editor_request(request, Ok(EditOutcome::Changed("new".to_owned())));
+        app.handle_input(key(KeyCode::Enter));
+        for _ in 0..4 {
+            let Some(msg) = rx.recv().await else {
+                break;
+            };
+            app.apply(msg);
+            if app
+                .status
+                .as_ref()
+                .is_some_and(|status| status.text == "policy 'team' saved")
+            {
+                break;
+            }
+        }
+        assert!(
+            vault
+                .policy_writes()
+                .iter()
+                .any(|(name, policy)| name == "team" && policy == "new")
+        );
+        assert_eq!(
+            app.status.as_ref().map(|status| status.text.as_str()),
+            Some("policy 'team' saved")
+        );
+    }
+
+    #[test]
+    fn new_policy_prompt_to_capability_to_editor_request() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Policies);
+        app.handle_input(key(KeyCode::Char('n')));
+        for ch in "newpolicy".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        let generation = app.store.generation();
+        app.apply(Msg::PolicyCapabilities {
+            generation,
+            name: "newpolicy".to_owned(),
+            writable: true,
+        });
+        assert!(app.take_editor_request().is_some());
+    }
+
+    #[test]
     fn new_secret_prompt_opens_and_edits_with_chars() {
         // Given: a writable token in the secrets view.
         let (mut app, _rx, _vault) = test_app();
@@ -2739,5 +4361,306 @@ mod tests {
             })
         };
         assert!(deleted);
+    }
+
+    async fn drain_up_to(
+        app: &mut App<FakeVault>,
+        rx: &mut mpsc::UnboundedReceiver<Msg>,
+        max: usize,
+    ) {
+        for _ in 0..max {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+                Ok(Some(msg)) => app.apply(msg),
+                _ => break,
+            }
+        }
+    }
+
+    #[test]
+    fn colon_opens_command_prompt_outside_editor() {
+        // Given: the engines view.
+        let (mut app, _rx, _vault) = test_app();
+
+        // When: `:` is pressed.
+        app.handle_input(key(KeyCode::Char(':')));
+
+        // Then: the command prompt opens.
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::Command)
+        );
+    }
+
+    #[test]
+    fn colon_is_literal_text_inside_secret_editor() {
+        // Given: an open secret in edit mode.
+        let (mut app, _rx, _vault) = test_app();
+        let kv = kv_data("pw");
+        let original = kv.data.clone();
+        app.secret_data = Some(SecretDataUi {
+            key: SecretPath::new("team/creds"),
+            data: kv,
+            selected: 0,
+            mode: DataMode::Edit {
+                key: "password".to_owned(),
+                text: String::new(),
+            },
+            original_data: original,
+        });
+        app.state = AppState::Main(Mode::SecretData);
+
+        // When: `:` is pressed while editing.
+        app.handle_input(key(KeyCode::Char(':')));
+
+        // Then: it is typed into the value rather than opening the palette.
+        assert_eq!(app.prompt, None);
+        let ui = app.secret_data.as_ref().expect("secret data");
+        assert_eq!(
+            ui.mode,
+            DataMode::Edit {
+                key: "password".to_owned(),
+                text: ":".to_owned()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn command_token_opens_inspector_with_details_and_capabilities() {
+        // Given: the engines view with a token that may manage tokens.
+        let (mut app, mut rx, _vault) = test_app();
+
+        // When: `:token` is submitted.
+        app.handle_input(key(KeyCode::Char(':')));
+        for ch in "token".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+
+        // Then: the inspector is shown with loaded details and probed capabilities.
+        assert_eq!(app.state, AppState::Main(Mode::Token));
+        drain_up_to(&mut app, &mut rx, 6).await;
+        assert!(app.token_model().loaded);
+        assert!(app.token_can_create);
+        assert!(app.token_can_wrap);
+    }
+
+    #[tokio::test]
+    async fn renew_token_reports_success() {
+        // Given: an open token inspector.
+        let (mut app, mut rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Token);
+        app.token_details = Some(TokenInfo::default());
+
+        // When: `r` renews the token.
+        app.handle_input(key(KeyCode::Char('r')));
+        drain_up_to(&mut app, &mut rx, 4).await;
+
+        // Then: a success status is surfaced.
+        assert_eq!(
+            app.status.as_ref().map(|status| status.text.as_str()),
+            Some("token renewed")
+        );
+    }
+
+    #[tokio::test]
+    async fn child_token_prompt_chain_mints_token_shown_once() {
+        // Given: an open token inspector with create rights.
+        let (mut app, mut rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Token);
+        app.token_details = Some(TokenInfo::default());
+        app.token_can_create = true;
+
+        // When: `n` drives the policies -> ttl -> uses prompt chain.
+        app.handle_input(key(KeyCode::Char('n')));
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::ChildTokenPolicies)
+        );
+        for ch in "default,app".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::ChildTokenTtl)
+        );
+        for ch in "1h".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::ChildTokenUses)
+        );
+        app.handle_input(key(KeyCode::Char('3')));
+        app.handle_input(key(KeyCode::Enter));
+        drain_up_to(&mut app, &mut rx, 4).await;
+
+        // Then: the minted token is shown once in the preview pane with a warning.
+        let pane = app.token_model().pane.expect("pane");
+        assert_eq!(pane.title, "New Token (shown once)");
+        assert_eq!(pane.body, "child-token-value");
+        assert!(pane.warning.is_some());
+    }
+
+    #[tokio::test]
+    async fn unwrap_command_shows_payload_in_pane() {
+        // Given: the engines view.
+        let (mut app, mut rx, _vault) = test_app();
+
+        // When: `:unwrap` is submitted with a wrapping token.
+        app.handle_input(key(KeyCode::Char(':')));
+        for ch in "unwrap".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::UnwrapToken)
+        );
+        for ch in "hvs.wrapping".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        drain_up_to(&mut app, &mut rx, 6).await;
+
+        // Then: the inspector shows the pretty-printed payload.
+        assert_eq!(app.state, AppState::Main(Mode::Token));
+        let pane = app.token_model().pane.expect("pane");
+        assert!(pane.body.contains("hunter2"));
+    }
+
+    #[test]
+    fn copy_token_pane_copies_the_payload() {
+        // Given: a token inspector showing an unwrapped payload.
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Token);
+        app.clipboard = Box::<TestClipboard>::default();
+        app.token_pane = Some(TokenPane::Unwrapped("{\"a\":1}".to_owned()));
+
+        // When: `c` is pressed.
+        app.handle_input(key(KeyCode::Char('c')));
+
+        // Then: the payload is copied.
+        assert_eq!(
+            app.status.as_ref().map(|status| status.text.as_str()),
+            Some("Copied to clipboard")
+        );
+    }
+
+    #[test]
+    fn copy_token_pane_without_payload_reports_nothing_to_copy() {
+        // Given: a token inspector with no preview pane.
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Token);
+        app.token_details = Some(TokenInfo::default());
+
+        // When: `c` is pressed.
+        app.handle_input(key(KeyCode::Char('c')));
+
+        // Then: an informational status is shown.
+        assert_eq!(
+            app.status.as_ref().map(|status| status.text.as_str()),
+            Some("nothing to copy")
+        );
+    }
+
+    #[test]
+    fn unknown_command_keeps_prompt_open_with_error() {
+        // Given: the command palette.
+        let (mut app, _rx, _vault) = test_app();
+        app.handle_input(key(KeyCode::Char(':')));
+        for ch in "nope".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+
+        // When: an unknown command is submitted.
+        app.handle_input(key(KeyCode::Enter));
+
+        // Then: the prompt stays open with an explanatory error.
+        let prompt = app.prompt.as_ref().expect("prompt");
+        assert_eq!(prompt.kind, PromptKind::Command);
+        assert!(prompt.error.is_some());
+    }
+
+    #[test]
+    fn child_token_creation_gated_when_capability_missing() {
+        // Given: a token with a resolved probe that denies child-token creation.
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Token);
+        app.token_details = Some(TokenInfo::default());
+        app.token_caps_loaded = true;
+        app.token_can_create = false;
+
+        // When: `n` is pressed.
+        app.handle_input(key(KeyCode::Char('n')));
+
+        // Then: no prompt opens and a permission error is shown.
+        assert_eq!(app.prompt, None);
+        assert_eq!(
+            app.status.as_ref().map(|status| status.kind),
+            Some(StatusKind::Error)
+        );
+    }
+
+    #[test]
+    fn child_token_prompt_denies_at_submit_while_capabilities_pending() {
+        // Given: capabilities still probing (fail-closed) so the prompt is allowed to open.
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Token);
+        app.token_details = Some(TokenInfo::default());
+        app.token_caps_loaded = false;
+        app.token_can_create = false;
+
+        // When: `n` opens the chain and all three prompts are submitted.
+        app.handle_input(key(KeyCode::Char('n')));
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::ChildTokenPolicies)
+        );
+        for ch in "default".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Enter));
+
+        // Then: minting is refused at submit and no prompt remains.
+        assert_eq!(app.prompt, None);
+        assert_eq!(
+            app.status.as_ref().map(|status| status.kind),
+            Some(StatusKind::Error)
+        );
+    }
+
+    #[test]
+    fn leaving_token_inspector_discards_shown_token() {
+        // Given: a token inspector displaying a one-time payload.
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Token);
+        app.token_details = Some(TokenInfo::default());
+        app.token_pane = Some(TokenPane::Unwrapped("secret-payload".to_owned()));
+
+        // When: the inspector is left.
+        app.handle_input(key(KeyCode::Esc));
+
+        // Then: the payload is no longer held in memory.
+        assert!(app.token_pane.is_none());
+        assert_eq!(app.state, AppState::Main(Mode::Engines));
+    }
+
+    #[test]
+    fn escape_returns_from_token_inspector_to_previous_mode() {
+        // Given: the token inspector opened from the secret data view.
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::SecretData);
+        app.open_token_view();
+        assert_eq!(app.state, AppState::Main(Mode::Token));
+
+        // When: Esc is pressed.
+        app.handle_input(key(KeyCode::Esc));
+
+        // Then: the previous mode is restored.
+        assert_eq!(app.state, AppState::Main(Mode::SecretData));
     }
 }

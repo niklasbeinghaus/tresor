@@ -24,6 +24,12 @@ supports **KV2 secret engines only** (same as the Go version).
 - `<e>` edit secret value (inline textarea), `Ctrl+S` save
 - `<c>` copy secret value to the system clipboard
 - `Ctrl+R` hard reload of the current path (with 404 backtrack)
+- Token inspector (`:token`): `lookup-self` details, renew-self, and child-token
+  creation (policies + TTL + use limit) — the minted token is shown once and copyable
+- Response wrapping: `:unwrap` a wrapping token into a pretty-printed payload, or
+  `:wrap` a JSON payload with an optional TTL
+- `:policies` browses ACL policies with a read-only preview pane
+- `<e>` authors/edits a policy in your `$EDITOR` (never an in-TUI editor), `<n>` creates one
 - Vault header: address, sealed state, version, token policies/expiry
 - Config modal when `VAULT_ADDR`/`VAULT_TOKEN` are missing
 - Color-coded status line (errors/errors/info/success, auto-clear after 5s)
@@ -45,15 +51,38 @@ tracked with their reasoning in [`docs/out-of-scope.md`](docs/out-of-scope.md).
 | `Esc` | back one level / cancel |
 | `↑ ↓` / `j k` | move selection |
 | `Tab` | next key (secret data view) |
+| `:` | open the command bar (`:policies` opens the ACL policy browser) |
 | `x` | reveal secret value |
-| `e` | edit secret value |
+| `e` | edit secret value; in the policies view, edit the selected policy in `$EDITOR` |
 | `c` | copy secret value |
-| `n` | new secret (secrets view, when permitted) |
+| `n` | new secret / new policy (when permitted) |
 | `d` | delete secret — with confirmation (secrets view, when permitted) |
 | `a` | add key to the open secret (when permitted) |
 | `Ctrl+S` | save edits |
 | `Ctrl+R` | hard refresh current path |
+| `:` | command palette (`token`, `t`, `unwrap`, `u`, `wrap`, `w`) |
+| `r` | renew the active token (token inspector) |
+| `n` | create a child token (token inspector, when permitted) |
+| `w` | wrap a JSON payload (token inspector, when permitted) |
+| `u` | unwrap a wrapping token (token inspector) |
+| `c` | copy the shown token/payload (token inspector) |
 | `Ctrl+C` | quit |
+
+## Policies
+
+Open the ACL policy browser with the `:policies` command (`:` opens the command
+bar at the bottom of the screen). The left pane lists every ACL policy
+(`GET sys/policies/acl`, with a `GET ?list=true` fallback for gateways that
+reject the `LIST` verb); the right pane previews the selected policy's HCL text
+read-only. Policy text that Vault returns `base64:`-prefixed is decoded for
+display.
+
+Editing never happens inside the TUI: `<e>` suspends the interface and hands the
+policy to `$EDITOR` (`$VISUAL` first, then `$EDITOR`), then reads the result back.
+If the text changed you get a confirmation prompt before `<Enter>` `PUT`s it to
+`sys/policies/acl/{name}`. `<n>` authors a brand-new policy the same way. The
+edit action is **capability-gated**: tresor probes `sys/policies/acl/{name}` and
+only offers it when your token holds `create`, `update`, or `root` there.
 
 ## Install
 

@@ -110,13 +110,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 secrecy = "0.10"
 futures = "0.3"
+# External-editor handoff (policy authoring) needs a secure temp file at runtime,
+# and base64 decodes the `base64:`-prefixed ACL policy bodies Vault may return.
+tempfile = "3"
+base64 = "0.22"
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml", "filters"] }
 proptest = "1"
 wiremock = "0.6"
 tokio = { version = "1", features = ["full", "test-util"] }
-tempfile = "3"
 
 [profile.release]
 opt-level = 3

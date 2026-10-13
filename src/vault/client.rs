@@ -4,18 +4,25 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
+use base64::Engine as _;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::Value;
 use vaultrs::client::{VaultClient as InnerVaultClient, VaultClientSettingsBuilder};
 use vaultrs::error::ClientError;
 
-use super::{VaultApi, VaultError};
+use super::{VaultApi, VaultError, encode_acl_policy_name};
 use crate::constants::NA_VALUE;
-use crate::model::{HealthInfo, KvData, KvMetadata, SecretEntry, TokenInfo};
+use crate::model::{
+    HealthInfo, KvData, KvMetadata, MintedToken, PolicyDocument, PolicyEntry, SecretEntry,
+    TokenCreateRequest, TokenInfo, WrappedToken,
+};
 use crate::path::SecretPath;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const ERROR_DETAIL_LIMIT: usize = 200;
+/// Vault's `sys/wrapping/wrap` endpoint rejects requests without a wrap TTL, so a
+/// blank request uses this default (the same 5 minutes the `vault` CLI applies).
+const DEFAULT_WRAP_TTL: &str = "5m";
 
 /// Vault client implemented by the `vaultrs` crate, with a direct HTTP
 /// fallback for the lenient `/v1/sys/health` probe (`OpenBao` compatibility).
@@ -250,6 +257,13 @@ impl VaultApi for VaultClient {
             Ok(TokenInfo {
                 policies: response.policies,
                 expire_time: response.expire_time,
+                accessor: response.accessor,
+                display_name: response.display_name,
+                ttl: response.ttl,
+                creation_time: response.creation_time,
+                renewable: response.renewable.unwrap_or(false),
+                num_uses: response.num_uses,
+                orphan: response.orphan,
             })
         }
     }
@@ -338,6 +352,256 @@ impl VaultApi for VaultClient {
                 .map(|_| ())
         }
     }
+
+    fn renew_token_self(&self) -> impl std::future::Future<Output = Result<(), VaultError>> + Send {
+        let url = format!("{}/v1/auth/token/renew-self", self.addr);
+        let token = self.token.expose_secret().to_owned();
+        let http = self.http.clone();
+        async move {
+            Self::raw_json(
+                http,
+                &url,
+                reqwest::Method::POST,
+                &token,
+                "auth/token/renew-self",
+            )
+            .await
+            .map(|_| ())
+        }
+    }
+
+    fn list_acl_policies(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<PolicyEntry>, VaultError>> + Send {
+        let url = format!("{}/v1/sys/policies/acl", self.addr);
+        let api_path = "sys/policies/acl".to_owned();
+        let http = self.http.clone();
+        let token = self.token.expose_secret().to_owned();
+        async move {
+            let method = reqwest::Method::from_bytes(b"LIST")
+                .map_err(|err| VaultError::Connection(err.to_string()))?;
+            let body = match Self::raw_json(http.clone(), &url, method, &token, &api_path).await {
+                Ok(body) => body,
+                Err(VaultError::Api {
+                    status: 400 | 403 | 405,
+                    ..
+                }) => {
+                    let fallback_url = format!("{url}?list=true");
+                    Self::raw_json(http, &fallback_url, reqwest::Method::GET, &token, &api_path)
+                        .await?
+                }
+                Err(err) => return Err(err),
+            };
+            let mut entries: Vec<PolicyEntry> = body
+                .get("data")
+                .and_then(|data| data.get("keys"))
+                .and_then(Value::as_array)
+                .map_or_else(Vec::new, |keys| {
+                    keys.iter()
+                        .filter_map(Value::as_str)
+                        .map(|name| PolicyEntry {
+                            name: name.to_owned(),
+                        })
+                        .collect()
+                });
+            entries.sort_by(|left, right| left.name.cmp(&right.name));
+            Ok(entries)
+        }
+    }
+
+    fn read_acl_policy(
+        &self,
+        name: &str,
+    ) -> impl std::future::Future<Output = Result<PolicyDocument, VaultError>> + Send {
+        let encoded_name = encode_acl_policy_name(name);
+        let url = format!("{}/v1/sys/policies/acl/{encoded_name}", self.addr);
+        let api_path = format!("sys/policies/acl/{encoded_name}");
+        let requested_name = name.to_owned();
+        let http = self.http.clone();
+        let token = self.token.expose_secret().to_owned();
+        async move {
+            let body = Self::raw_json(http, &url, reqwest::Method::GET, &token, &api_path).await?;
+            let data = body
+                .get("data")
+                .ok_or_else(|| VaultError::Parse("policy response had no data".to_owned()))?;
+            let resolved_name = data
+                .get("name")
+                .and_then(Value::as_str)
+                .map_or_else(|| requested_name.clone(), str::to_owned);
+            let raw_policy = data
+                .get("policy")
+                .and_then(Value::as_str)
+                .ok_or_else(|| VaultError::Parse("policy response had no policy".to_owned()))?;
+            Ok(PolicyDocument {
+                name: resolved_name,
+                policy: decode_acl_policy_body(raw_policy)?,
+            })
+        }
+    }
+
+    fn write_acl_policy(
+        &self,
+        name: &str,
+        policy: &str,
+    ) -> impl std::future::Future<Output = Result<(), VaultError>> + Send {
+        let encoded_name = encode_acl_policy_name(name);
+        let url = format!("{}/v1/sys/policies/acl/{encoded_name}", self.addr);
+        let api_path = format!("sys/policies/acl/{encoded_name}");
+        let body = serde_json::json!({"policy": policy});
+        let token = self.token.expose_secret().to_owned();
+        let http = self.http.clone();
+        async move {
+            Self::raw_request(
+                http.put(url).header("X-Vault-Token", token).json(&body),
+                &api_path,
+            )
+            .await
+            .map(|_| ())
+        }
+    }
+
+    fn create_token(
+        &self,
+        request: &TokenCreateRequest,
+    ) -> impl std::future::Future<Output = Result<MintedToken, VaultError>> + Send {
+        let url = format!("{}/v1/auth/token/create", self.addr);
+        let token = self.token.expose_secret().to_owned();
+        let http = self.http.clone();
+        let body = token_create_body(request);
+        async move {
+            let response =
+                Self::raw_json_post(http, &url, &token, "auth/token/create", &body).await?;
+            minted_token_from_body(&response)
+        }
+    }
+
+    fn wrap_data(
+        &self,
+        data: &Value,
+        ttl: Option<&str>,
+    ) -> impl std::future::Future<Output = Result<WrappedToken, VaultError>> + Send {
+        let url = format!("{}/v1/sys/wrapping/wrap", self.addr);
+        let token = self.token.expose_secret().to_owned();
+        let http = self.http.clone();
+        let data = data.clone();
+        let ttl = ttl.unwrap_or(DEFAULT_WRAP_TTL).to_owned();
+        async move {
+            // The wrap TTL travels as a header, not in the body, and is required.
+            let request = http
+                .post(&url)
+                .header("X-Vault-Token", &token)
+                .header("X-Vault-Wrap-TTL", ttl.as_str())
+                .json(&data);
+            let response = Self::raw_request(request, "sys/wrapping/wrap").await?;
+            wrapped_token_from_body(&response)
+        }
+    }
+
+    fn unwrap_data(
+        &self,
+        wrapping_token: &str,
+    ) -> impl std::future::Future<Output = Result<String, VaultError>> + Send {
+        let url = format!("{}/v1/sys/wrapping/unwrap", self.addr);
+        let http = self.http.clone();
+        let wrapping_token = wrapping_token.to_owned();
+        async move {
+            // The wrapping token authenticates the unwrap request itself.
+            let response = Self::raw_json(
+                http,
+                &url,
+                reqwest::Method::POST,
+                &wrapping_token,
+                "sys/wrapping/unwrap",
+            )
+            .await?;
+            serde_json::to_string_pretty(&unwrap_payload(&response))
+                .map_err(|err| VaultError::Parse(err.to_string()))
+        }
+    }
+}
+
+/// Builds the `auth/token/create` request body, omitting unset parameters so
+/// Vault applies its defaults.
+fn token_create_body(request: &TokenCreateRequest) -> Value {
+    let mut body = serde_json::Map::new();
+    if !request.policies.is_empty() {
+        body.insert("policies".to_owned(), Value::from(request.policies.clone()));
+    }
+    if let Some(ttl) = &request.ttl {
+        body.insert("ttl".to_owned(), Value::from(ttl.clone()));
+    }
+    if let Some(num_uses) = request.num_uses {
+        body.insert("num_uses".to_owned(), Value::from(num_uses));
+    }
+    Value::Object(body)
+}
+
+fn minted_token_from_body(response: &Value) -> Result<MintedToken, VaultError> {
+    let auth = response
+        .get("auth")
+        .ok_or_else(|| VaultError::Parse("create-token response had no auth block".to_owned()))?;
+    let token = auth
+        .get("client_token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| VaultError::Parse("create-token response had no client_token".to_owned()))?;
+    let mut policies = string_list(auth, "token_policies");
+    if policies.is_empty() {
+        policies = string_list(auth, "policies");
+    }
+    Ok(MintedToken {
+        token: SecretString::from(token.to_owned()),
+        accessor: string_field(auth, "accessor"),
+        policies,
+        ttl: auth.get("lease_duration").and_then(Value::as_u64),
+        renewable: auth
+            .get("renewable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn wrapped_token_from_body(response: &Value) -> Result<WrappedToken, VaultError> {
+    let info = response
+        .get("wrap_info")
+        .ok_or_else(|| VaultError::Parse("wrap response had no wrap_info".to_owned()))?;
+    let token = info
+        .get("token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| VaultError::Parse("wrap response had no token".to_owned()))?;
+    Ok(WrappedToken {
+        token: SecretString::from(token.to_owned()),
+        accessor: string_field(info, "accessor"),
+        ttl: info.get("ttl").and_then(Value::as_u64).unwrap_or(0),
+    })
+}
+
+/// Returns the unwrapped payload: the `data` block when present, else the envelope.
+fn unwrap_payload(response: &Value) -> Value {
+    response
+        .get("data")
+        .cloned()
+        .unwrap_or_else(|| response.clone())
+}
+
+fn string_field(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn string_list(value: &Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map_or_else(Vec::new, |items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
 }
 
 fn secret_entry(key: &str) -> SecretEntry {
@@ -441,4 +705,33 @@ fn error_detail_from_body(body: &Value) -> String {
         .and_then(|errors| errors.first())
         .and_then(Value::as_str)
         .map_or_else(String::new, truncate_detail)
+}
+
+fn decode_acl_policy_body(policy: &str) -> Result<String, VaultError> {
+    if let Some(payload) = policy.strip_prefix("base64:") {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .map_err(|err| VaultError::Parse(err.to_string()))?;
+        String::from_utf8(bytes).map_err(|err| VaultError::Parse(err.to_string()))
+    } else {
+        Ok(policy.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_acl_policy_body, encode_acl_policy_name};
+
+    #[test]
+    fn decode_acl_policy_base64_prefix_decodes_utf8() {
+        let decoded = decode_acl_policy_body("base64:cGF0aCBcInNlY3JldC9cIiB7fQ==")
+            .expect("base64 policy should decode");
+        assert_eq!(decoded, "path \\\"secret/\\\" {}");
+    }
+
+    #[test]
+    fn encode_acl_policy_name_escapes_slashes() {
+        let encoded = encode_acl_policy_name("team/admin");
+        assert_eq!(encoded, "team%2Fadmin");
+    }
 }

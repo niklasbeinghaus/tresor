@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use crate::model::{HealthInfo, KvData, SecretEntry, TokenInfo};
+use crate::model::{
+    HealthInfo, KvData, MintedToken, PolicyDocument, PolicyEntry, SecretEntry, TokenInfo,
+    WrappedToken,
+};
 use crate::path::SecretPath;
 
 /// Composite key for a cached listing: mount engine plus relative KV path.
@@ -115,6 +118,73 @@ pub enum Msg {
         /// Cache key of the created secret.
         key: CacheKey,
     },
+    /// The active token was renewed successfully.
+    TokenRenewed {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+    },
+    /// A child token was minted (value shown once; never cached).
+    TokenMinted {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// The minted token details.
+        minted: MintedToken,
+    },
+    /// Data was wrapped into a wrapping token (shown once; never cached).
+    DataWrapped {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// The wrapping token details.
+        wrapped: WrappedToken,
+    },
+    /// A wrapping token was unwrapped into a pretty-printed payload.
+    DataUnwrapped {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Pretty-printed JSON payload.
+        payload: String,
+    },
+    /// Token-management capabilities for the active token were loaded (action gating).
+    TokenCapabilities {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Whether the token may create child tokens (`auth/token/create`).
+        can_create: bool,
+        /// Whether the token may wrap data (`sys/wrapping/wrap`).
+        can_wrap: bool,
+    },
+    /// ACL policy list was loaded.
+    PoliciesLoaded {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Loaded ACL policy entries.
+        entries: Vec<PolicyEntry>,
+    },
+    /// One ACL policy document was loaded.
+    PolicyLoaded {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Policy name key.
+        name: String,
+        /// Loaded policy document.
+        document: PolicyDocument,
+    },
+    /// An ACL policy was written successfully.
+    PolicyWritten {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Written policy name.
+        name: String,
+    },
+    /// ACL policy write capability for a policy name.
+    PolicyCapabilities {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Policy name that was probed.
+        name: String,
+        /// Whether this policy is writable.
+        writable: bool,
+    },
 }
 
 /// In-memory cache the renderer folds messages into.
@@ -122,7 +192,10 @@ pub enum Msg {
 pub struct Store {
     /// Cached secret engines.
     pub engines: Vec<SecretEntry>,
+    /// Cached ACL policy list.
+    pub policies: Vec<PolicyEntry>,
     secrets: HashMap<CacheKey, Vec<SecretEntry>>,
+    policy_documents: HashMap<String, PolicyDocument>,
     generation: u64,
 }
 
@@ -155,13 +228,28 @@ impl Store {
                 self.secrets.insert(key, entries);
                 true
             }
+            Msg::PoliciesLoaded { entries, .. } => {
+                self.policies = entries;
+                true
+            }
+            Msg::PolicyLoaded { name, document, .. } => {
+                self.policy_documents.insert(name, document);
+                true
+            }
             Msg::SecretLoaded { .. }
             | Msg::HealthLoaded { .. }
             | Msg::TokenLoaded { .. }
             | Msg::SecretWritten { .. }
             | Msg::Capabilities { .. }
             | Msg::SecretCreated { .. }
-            | Msg::SecretDeleted { .. } => true,
+            | Msg::SecretDeleted { .. }
+            | Msg::TokenRenewed { .. }
+            | Msg::TokenMinted { .. }
+            | Msg::DataWrapped { .. }
+            | Msg::DataUnwrapped { .. }
+            | Msg::TokenCapabilities { .. }
+            | Msg::PolicyWritten { .. }
+            | Msg::PolicyCapabilities { .. } => true,
             Msg::HardRefreshed { key, .. } => {
                 self.secrets.remove(&key);
                 true
@@ -193,10 +281,22 @@ impl Store {
         &self.engines
     }
 
+    /// Returns the cached ACL policy list.
+    #[must_use]
+    pub fn policies(&self) -> &[PolicyEntry] {
+        &self.policies
+    }
+
     /// Returns a cached child listing by key.
     #[must_use]
     pub fn secrets(&self, key: &CacheKey) -> Option<&[SecretEntry]> {
         self.secrets.get(key).map(Vec::as_slice)
+    }
+
+    /// Returns a cached ACL policy document by name.
+    #[must_use]
+    pub fn policy_document(&self, name: &str) -> Option<&PolicyDocument> {
+        self.policy_documents.get(name)
     }
 
     fn evict_not_found(&mut self, key: &CacheKey) {
@@ -226,6 +326,15 @@ impl Msg {
             | Self::Capabilities { generation, .. }
             | Self::SecretCreated { generation, .. }
             | Self::SecretDeleted { generation, .. }
+            | Self::TokenRenewed { generation, .. }
+            | Self::TokenMinted { generation, .. }
+            | Self::DataWrapped { generation, .. }
+            | Self::DataUnwrapped { generation, .. }
+            | Self::TokenCapabilities { generation, .. }
+            | Self::PoliciesLoaded { generation, .. }
+            | Self::PolicyLoaded { generation, .. }
+            | Self::PolicyWritten { generation, .. }
+            | Self::PolicyCapabilities { generation, .. }
             | Self::HardRefreshed { generation, .. }
             | Self::PathNotFound { generation, .. }
             | Self::Failure { generation, .. } => *generation,

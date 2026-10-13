@@ -19,8 +19,12 @@ pub enum Page {
     Engines,
     /// Hierarchical secret browser.
     Secrets,
+    /// ACL policies browser.
+    Policies,
     /// Secret key/value view.
     SecretData,
+    /// Token inspector view.
+    Token,
 }
 
 impl Page {
@@ -31,7 +35,9 @@ impl Page {
             Self::Config => "Vault Configuration",
             Self::Engines => "[Secret Engines]",
             Self::Secrets => "Secrets",
+            Self::Policies => "[Policies]",
             Self::SecretData => "Secret Data",
+            Self::Token => "Token Inspector",
         }
     }
 
@@ -42,6 +48,7 @@ impl Page {
         match (self, permission.write, permission.delete) {
             (Self::Config, _, _) => &[("enter", "connect"), ("esc", "quit")],
             (Self::Engines, _, _) => &[("enter", "open"), ("esc", "quit"), ("j/k", "move")],
+            (Self::Token, _, _) => token_hints(permission),
             (Self::Secrets, true, true) => &[
                 ("enter", "open"),
                 ("n", "new secret"),
@@ -61,6 +68,20 @@ impl Page {
                 ("enter", "open"),
                 ("esc", "back"),
                 ("^r", "refresh"),
+                ("j/k", "move"),
+            ],
+            (Self::Policies, true, _) => &[
+                ("enter", "preview"),
+                ("e", "edit"),
+                ("n", "new"),
+                ("esc", "engines"),
+                (":", "command"),
+                ("j/k", "move"),
+            ],
+            (Self::Policies, false, _) => &[
+                ("enter", "preview"),
+                ("esc", "engines"),
+                (":", "command"),
                 ("j/k", "move"),
             ],
             (Self::SecretData, true, _) => &[
@@ -85,30 +106,42 @@ impl Page {
 }
 
 /// What the token may do at the current path (drives which hints are shown).
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent capability flags grouped for command-bar rendering"
+)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Permission {
     /// Token may create/update secrets here.
     pub write: bool,
     /// Token may delete secrets here.
     pub delete: bool,
+    /// Token may create child tokens.
+    pub create_token: bool,
+    /// Token may wrap data.
+    pub wrap: bool,
 }
 
 impl Permission {
-    /// No write or delete rights (browse-only).
+    /// No write, delete, or token-management rights (browse-only).
     #[must_use]
     pub const fn read_only() -> Self {
         Self {
             write: false,
             delete: false,
+            create_token: false,
+            wrap: false,
         }
     }
 
-    /// Full write and delete rights.
+    /// Full write, delete, and token-management rights.
     #[must_use]
     pub const fn all() -> Self {
         Self {
             write: true,
             delete: true,
+            create_token: true,
+            wrap: true,
         }
     }
 }
@@ -130,6 +163,40 @@ pub enum CommandBarInput<'a> {
         /// Total number of rows in the focused list.
         total: usize,
     },
+}
+
+/// Token-inspector hints, hiding child-token and wrap actions the token may not perform.
+const fn token_hints(permission: Permission) -> &'static [(&'static str, &'static str)] {
+    match (permission.create_token, permission.wrap) {
+        (true, true) => &[
+            ("r", "renew"),
+            ("n", "new token"),
+            ("w", "wrap"),
+            ("u", "unwrap"),
+            ("c", "copy"),
+            ("esc", "back"),
+        ],
+        (true, false) => &[
+            ("r", "renew"),
+            ("n", "new token"),
+            ("u", "unwrap"),
+            ("c", "copy"),
+            ("esc", "back"),
+        ],
+        (false, true) => &[
+            ("r", "renew"),
+            ("w", "wrap"),
+            ("u", "unwrap"),
+            ("c", "copy"),
+            ("esc", "back"),
+        ],
+        (false, false) => &[
+            ("r", "renew"),
+            ("u", "unwrap"),
+            ("c", "copy"),
+            ("esc", "back"),
+        ],
+    }
 }
 
 /// Draws the one-row command bar: key hints left, page title right.
@@ -288,6 +355,39 @@ mod tests {
     }
 
     #[test]
+    fn commands_bar_policies_shows_contextual_hints() {
+        let backend = TestBackend::new(100, 1);
+        let mut terminal = Terminal::new(backend).expect("TestBackend");
+        terminal
+            .draw(|frame| {
+                draw_commands(
+                    frame,
+                    Rect::new(0, 0, 100, 1),
+                    Page::Policies,
+                    Permission::all(),
+                    &Theme::default(),
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut output = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                output.push_str(
+                    buffer
+                        .cell((x, y))
+                        .map_or("", ratatui::buffer::Cell::symbol),
+                );
+            }
+            output.push('\n');
+        }
+        assert!(output.contains("enter preview"));
+        assert!(output.contains("e edit"));
+        assert!(output.contains("n new"));
+        assert!(output.contains("[Policies]"));
+    }
+
+    #[test]
     fn commands_bar_secret_data_shows_all_edit_hints() {
         // Given: the secret data page.
         // When: the bar is rendered.
@@ -319,7 +419,7 @@ mod tests {
         let read_only = Page::Secrets.hints(Permission::read_only());
         let write_only = Page::Secrets.hints(Permission {
             write: true,
-            delete: false,
+            ..Permission::read_only()
         });
         let full = Page::Secrets.hints(Permission::all());
         let data_readonly = Page::SecretData.hints(Permission::read_only());
@@ -398,5 +498,30 @@ mod tests {
         assert_snapshot!("commands_filter_status", output);
         assert!(output.contains("/ap"));
         assert!(output.contains("3/12 matches"));
+    }
+
+    #[test]
+    fn token_hints_hide_gated_actions_without_capability() {
+        // Given/When: the token page across capability combinations.
+        let none = Page::Token.hints(Permission::read_only());
+        let full = Page::Token.hints(Permission::all());
+        let create_only = Page::Token.hints(Permission {
+            create_token: true,
+            ..Permission::read_only()
+        });
+        let wrap_only = Page::Token.hints(Permission {
+            wrap: true,
+            ..Permission::read_only()
+        });
+
+        // Then: only permitted token actions are advertised.
+        assert!(!none.iter().any(|(_, action)| *action == "new token"));
+        assert!(!none.iter().any(|(_, action)| *action == "wrap"));
+        assert!(full.iter().any(|(_, action)| *action == "new token"));
+        assert!(full.iter().any(|(_, action)| *action == "wrap"));
+        assert!(create_only.iter().any(|(_, action)| *action == "new token"));
+        assert!(!create_only.iter().any(|(_, action)| *action == "wrap"));
+        assert!(wrap_only.iter().any(|(_, action)| *action == "wrap"));
+        assert!(!wrap_only.iter().any(|(_, action)| *action == "new token"));
     }
 }
