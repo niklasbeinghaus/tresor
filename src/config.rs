@@ -140,6 +140,7 @@ fn trim_one_trailing_slash(value: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{Config, bao_var, from_vars, read_first_token};
+    use crate::test_support::env_lock;
 
     #[test]
     fn test_new_strips_one_trailing_slash_when_addr_ends_with_single_slash() {
@@ -329,12 +330,6 @@ mod tests {
     }
 
     /// Serializes tests that mutate the process environment.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     fn env_set<K: AsRef<std::ffi::OsStr>, V: AsRef<std::ffi::OsStr>>(name: K, value: V) {
         // SAFETY: callers hold `env_lock`, serializing all env writes in tests;
         // no other thread reads or writes these variables concurrently.

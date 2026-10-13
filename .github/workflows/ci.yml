@@ -51,9 +51,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --all-targets --all-features
-      - name: no pending snapshots
+      - name: lib tests (default harness, verbose) + no pending snapshots
         run: |
-          cargo test --all-features >/dev/null
+          # nextest (above) runs each test in its own process; this run exercises the
+          # default parallel harness in-process, so failures here are concurrency bugs.
+          cargo test --all-features
           if find . -name "*.snap.new" | grep -q .; then
             echo "Pending snapshots — run 'cargo insta review'"; exit 1
           fi

@@ -15,6 +15,8 @@ pub mod path;
 pub mod sofka;
 pub mod state;
 pub mod store;
+#[cfg(test)]
+pub mod test_support;
 pub mod theme;
 pub mod ui;
 pub mod vault;

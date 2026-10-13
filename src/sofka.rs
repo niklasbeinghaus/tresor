@@ -174,6 +174,7 @@ fn parse_hex(raw: &str) -> Option<Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::env_lock;
     use crate::theme::catppuccin_mocha;
 
     fn dir_with(path: &Path, name: &str, content: &str) -> PathBuf {
@@ -301,12 +302,5 @@ mod tests {
             theme.map(|theme| theme.status_error),
             Some(crate::theme::gruvbox_dark().red)
         );
-    }
-
-    /// Serializes tests that mutate the process environment.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
