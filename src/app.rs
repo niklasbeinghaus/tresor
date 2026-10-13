@@ -105,6 +105,8 @@ pub struct App<V: VaultApi> {
     pub config: Config,
     /// Semantic UI theme.
     pub theme: Theme,
+    /// Version rendered in the header (pinned by tests; crate version by default).
+    pub app_version: String,
     /// Transient header status line.
     pub status: Option<StatusLine>,
     /// Header health/token snapshot.
@@ -206,6 +208,7 @@ impl<V: VaultApi + 'static> App<V> {
                 vault,
                 config,
                 theme,
+                app_version: env!("CARGO_PKG_VERSION").to_owned(),
                 status: None,
                 info: None,
                 pending: false,
@@ -397,7 +400,7 @@ impl<V: VaultApi + 'static> App<V> {
     pub fn header_model(&self) -> HeaderModel {
         let info = self.info.clone().unwrap_or_default();
         HeaderModel {
-            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            app_version: self.app_version.clone(),
             vault_version: info.vault_version,
             addr: self.config.addr.clone(),
             sealed: info.sealed,
@@ -1840,6 +1843,8 @@ mod tests {
     #[test]
     fn draw_composes_header_and_engines() {
         let (mut app, _rx, _vault) = test_app();
+        // Pin the version so release bumps never invalidate this snapshot.
+        app.app_version = "0.1.0".to_owned();
         let generation = app.store.bump_generation();
         app.apply(Msg::EnginesLoaded {
             generation,
