@@ -442,9 +442,11 @@ impl<V: VaultApi + 'static> App<V> {
     fn apply_token_event(&mut self, msg: &Msg) -> bool {
         let current = self.store.generation();
         match msg {
-            Msg::TokenRenewed { .. } => {
-                self.set_status(StatusKind::Success, "token renewed");
-                self.spawn_read_token(current);
+            Msg::TokenRenewed { generation } => {
+                if *generation == current {
+                    self.set_status(StatusKind::Success, "token renewed");
+                    self.spawn_read_token(current);
+                }
             }
             Msg::TokenMinted { generation, minted } => {
                 if *generation == current {
