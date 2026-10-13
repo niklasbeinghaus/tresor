@@ -71,9 +71,9 @@ pub struct KvMetadata {
 pub struct VersionMeta {
     /// Secret version number.
     pub version: u64,
-    /// RFC3339 creation timestamp (empty string when Vault omits it).
+    /// `RFC3339` creation timestamp (empty string when Vault omits it).
     pub created_time: String,
-    /// RFC3339 deletion timestamp; `None` when the version is not soft-deleted.
+    /// `RFC3339` deletion timestamp; `None` when the version is not soft-deleted.
     pub deletion_time: Option<String>,
     /// True when the version was destroyed (data permanently gone).
     pub destroyed: bool,
