@@ -15,6 +15,22 @@ use secrecy::SecretString;
 
 use crate::path::SecretPath;
 
+/// A single ACL policy entry from `sys/policies/acl` listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyEntry {
+    /// Policy name.
+    pub name: String,
+}
+
+/// ACL policy document read from `sys/policies/acl/{name}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyDocument {
+    /// Policy name.
+    pub name: String,
+    /// Policy `HCL` text.
+    pub policy: String,
+}
+
 /// A single item in a KV2 list response. Directory entries keep their trailing `/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretEntry {

@@ -15,22 +15,33 @@ use tokio::sync::mpsc;
 use crate::clipboard::{TextClipboard, default_clipboard};
 use crate::config::Config;
 use crate::constants::{NA_VALUE, STATUS_EXPIRY_SECS, keys};
+<<<<<<< HEAD
 use crate::model::{
     HealthInfo, KvData, MintedToken, SecretEntry, TokenCreateRequest, TokenInfo, WrappedToken,
 };
+=======
+use crate::editor::{EditBuffer, EditOutcome, EditorError};
+use crate::model::{HealthInfo, KvData, SecretEntry, TokenInfo};
+>>>>>>> origin/main
 use crate::path::SecretPath;
 use crate::state::Mode;
 use crate::store::{CacheKey, Msg, Store};
 use crate::theme::Theme;
+use crate::ui::command_line::{CommandLineModel, draw_command_line};
 use crate::ui::commands::{Page, Permission, draw_commands};
 use crate::ui::engines::{EnginesModel, draw_engines};
 use crate::ui::header::{HeaderModel, StatusKind, StatusLine, draw_header};
 use crate::ui::modal::{ModalField, ModalModel, draw_modal};
+use crate::ui::policies::{PoliciesModel, PolicyPreview, draw_policies};
 use crate::ui::prompt::{PromptKind, PromptModel, draw_prompt};
 use crate::ui::secret_data::{DataMode, KeyRow, SecretDataModel, draw_secret_data};
 use crate::ui::secrets::{SecretsModel, draw_secrets, sort_entries};
+<<<<<<< HEAD
 use crate::ui::token::{PaneModel, TokenViewModel, draw_token};
 use crate::vault::{VaultApi, VaultError};
+=======
+use crate::vault::{VaultApi, VaultError, encode_acl_policy_name};
+>>>>>>> origin/main
 
 const TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -47,6 +58,56 @@ pub struct PromptState {
     pub input: String,
     /// Optional error (e.g. empty name, permission denied).
     pub error: Option<String>,
+    /// Optional detail line shown in confirm prompts.
+    pub detail: Option<String>,
+}
+
+/// Inline `:` command-line state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandLineState {
+    /// Command text without leading `:`.
+    pub input: String,
+    /// Optional command parse/dispatch error.
+    pub error: Option<String>,
+}
+
+/// Pending policy save payload between editor close and confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPolicySave {
+    /// Policy name.
+    pub name: String,
+    /// Original policy text.
+    pub old_policy: String,
+    /// New policy text.
+    pub new_policy: String,
+}
+
+/// Editor callback target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditorTarget {
+    /// Edit an ACL policy document.
+    Policy {
+        /// Policy name.
+        name: String,
+        /// Policy text loaded before editor launch.
+        original_policy: String,
+    },
+}
+
+/// Editor request emitted by the app and consumed by the terminal owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorRequest {
+    /// Requested target.
+    pub target: EditorTarget,
+    /// Text buffer metadata.
+    pub buffer: EditBuffer,
+}
+
+enum PolicyEffect {
+    PoliciesLoaded,
+    PolicyLoaded(String),
+    PolicyWritten(String),
+    PolicyCapabilities { name: String, writable: bool },
 }
 
 /// Header information loaded from Vault after connection.
@@ -120,7 +181,11 @@ struct ChildTokenDraft {
 /// Running TUI application with injectable Vault API.
 #[allow(
     clippy::struct_excessive_bools,
+<<<<<<< HEAD
     reason = "capability flags are independent booleans read directly by the UI, not a state machine"
+=======
+    reason = "legacy UI state keeps explicit boolean flags for clarity and tests"
+>>>>>>> origin/main
 )]
 pub struct App<V: VaultApi> {
     /// Current route state.
@@ -156,6 +221,7 @@ pub struct App<V: VaultApi> {
     pub can_delete: bool,
     /// Active input prompt, if any.
     pub prompt: Option<PromptState>,
+<<<<<<< HEAD
     /// Full token details for the token inspector (`lookup_self`).
     pub token_details: Option<TokenInfo>,
     /// Mode to return to when leaving the token inspector.
@@ -172,6 +238,20 @@ pub struct App<V: VaultApi> {
     pub token_can_wrap: bool,
     /// Whether the token capability probe has resolved (gating fails closed until then).
     token_caps_loaded: bool,
+=======
+    /// Active `:` command line, if any.
+    pub command_line: Option<CommandLineState>,
+    /// Selected row in the policies view.
+    pub policies_selected: usize,
+    /// Current selected policy write capability.
+    pub policy_can_write: bool,
+    pending_policy_edit: Option<String>,
+    pending_policy_new: Option<String>,
+    pending_policy_save: Option<PendingPolicySave>,
+    policy_preview_error: Option<(String, String)>,
+    /// Pending editor handoff request consumed by terminal owner.
+    pub editor_request: Option<EditorRequest>,
+>>>>>>> origin/main
     modal_addr: String,
     modal_token: String,
     modal_focus: ModalField,
@@ -264,6 +344,7 @@ impl<V: VaultApi + 'static> App<V> {
                 can_write: false,
                 can_delete: false,
                 prompt: None,
+<<<<<<< HEAD
                 token_details: None,
                 token_return: Mode::Engines,
                 token_pane: None,
@@ -272,6 +353,16 @@ impl<V: VaultApi + 'static> App<V> {
                 token_can_create: false,
                 token_can_wrap: false,
                 token_caps_loaded: false,
+=======
+                command_line: None,
+                policies_selected: 0,
+                policy_can_write: false,
+                pending_policy_edit: None,
+                pending_policy_new: None,
+                pending_policy_save: None,
+                policy_preview_error: None,
+                editor_request: None,
+>>>>>>> origin/main
                 modal_addr: String::new(),
                 modal_token: String::new(),
                 modal_focus: ModalField::Addr,
@@ -346,11 +437,25 @@ impl<V: VaultApi + 'static> App<V> {
         if self.prompt.is_some() {
             return self.handle_prompt_input(key);
         }
+<<<<<<< HEAD
         if matches!(self.state, AppState::Main(_))
             && key.code == KeyCode::Char(':')
             && !self.inside_secret_editor()
         {
             self.open_command_prompt();
+=======
+        if self.command_line.is_some() {
+            return self.handle_command_line_input(key);
+        }
+        if key.code == KeyCode::Char(keys::COMMAND)
+            && matches!(self.state, AppState::Main(_))
+            && !self.inside_secret_editor()
+        {
+            self.command_line = Some(CommandLineState {
+                input: String::new(),
+                error: None,
+            });
+>>>>>>> origin/main
             return false;
         }
         match self.state {
@@ -358,12 +463,17 @@ impl<V: VaultApi + 'static> App<V> {
             AppState::Main(Mode::Config) => false,
             AppState::Main(Mode::Engines) => self.handle_engines_input(key),
             AppState::Main(Mode::Secrets) => self.handle_secrets_input(key),
+            AppState::Main(Mode::Policies) => self.handle_policies_input(key),
             AppState::Main(Mode::SecretData) => self.handle_secret_data_input(key),
             AppState::Main(Mode::Token) => self.handle_token_input(key),
         }
     }
 
     /// Folds a background message into app/store state.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single fold point for all Msg variants by architecture"
+    )]
     pub fn apply(&mut self, msg: Msg) {
         self.pending = false;
         if self.apply_token_event(&msg) {
@@ -407,13 +517,21 @@ impl<V: VaultApi + 'static> App<V> {
             | Msg::EnginesLoaded { .. }
             | Msg::SecretsLoaded { .. }
             | Msg::HardRefreshed { .. }
+<<<<<<< HEAD
             | Msg::TokenRenewed { .. }
             | Msg::TokenMinted { .. }
             | Msg::DataWrapped { .. }
             | Msg::DataUnwrapped { .. }
             | Msg::TokenCapabilities { .. } => {}
+=======
+            | Msg::PoliciesLoaded { .. }
+            | Msg::PolicyLoaded { .. }
+            | Msg::PolicyWritten { .. }
+            | Msg::PolicyCapabilities { .. } => {}
+>>>>>>> origin/main
         }
 
+        let policy_effect = policy_effect(&msg);
         let mut cache_msg = msg;
         let capability_update = match &cache_msg {
             Msg::Capabilities {
@@ -427,10 +545,92 @@ impl<V: VaultApi + 'static> App<V> {
             sort_entries(entries);
         }
         let accepted = self.store.apply(cache_msg);
-        if accepted {
-            if let Some((writable, deletable)) = capability_update {
-                self.can_write = writable;
-                self.can_delete = deletable;
+        if !accepted {
+            return;
+        }
+        if let Some((writable, deletable)) = capability_update {
+            self.can_write = writable;
+            self.can_delete = deletable;
+        }
+        if let Some(effect) = policy_effect {
+            self.apply_policy_effect(effect);
+        }
+    }
+
+    // Applies the policy side effects of an accepted message. Runs after the store
+    // fold so it acts on fresh state (`Msg::PoliciesLoaded` must populate the list
+    // before its selected preview/capability loads are spawned), and a stale
+    // message cannot open the editor or clear pending save state.
+    fn apply_policy_effect(&mut self, effect: PolicyEffect) {
+        match effect {
+            PolicyEffect::PoliciesLoaded => {
+                self.policy_can_write = false;
+                self.policy_preview_error = None;
+                self.pending_policy_edit = None;
+                self.sync_policy_selection();
+                self.spawn_selected_policy_load();
+                self.spawn_selected_policy_capabilities();
+            }
+            PolicyEffect::PolicyLoaded(name) => {
+                if self
+                    .policy_preview_error
+                    .as_ref()
+                    .is_some_and(|(policy_name, _)| policy_name == &name)
+                {
+                    self.policy_preview_error = None;
+                }
+                let pending = self.pending_policy_edit.as_deref() == Some(name.as_str());
+                let selected = self.selected_policy_name().as_deref() == Some(name.as_str());
+                if pending && selected {
+                    self.pending_policy_edit = None;
+                    if let Some(policy) = self
+                        .store
+                        .policy_document(&name)
+                        .map(|document| document.policy.clone())
+                    {
+                        self.editor_request = Some(EditorRequest {
+                            target: EditorTarget::Policy {
+                                name: name.clone(),
+                                original_policy: policy.clone(),
+                            },
+                            buffer: EditBuffer {
+                                initial_text: policy,
+                                file_stem: name,
+                                extension: ".hcl",
+                            },
+                        });
+                    }
+                }
+            }
+            PolicyEffect::PolicyWritten(name) => {
+                self.pending_policy_save = None;
+                self.set_status(StatusKind::Success, format!("policy '{name}' saved"));
+                self.spawn_load_policies();
+                self.spawn_load_policy(name);
+            }
+            PolicyEffect::PolicyCapabilities { name, writable } => {
+                if self.selected_policy_name().as_deref() == Some(name.as_str()) {
+                    self.policy_can_write = writable;
+                }
+                if self.pending_policy_new.as_deref() == Some(name.as_str()) {
+                    let policy_name = name;
+                    self.pending_policy_new = None;
+                    if writable {
+                        self.editor_request = Some(EditorRequest {
+                            target: EditorTarget::Policy {
+                                name: policy_name.clone(),
+                                original_policy: String::new(),
+                            },
+                            buffer: EditBuffer {
+                                initial_text: String::new(),
+                                file_stem: policy_name,
+                                extension: ".hcl",
+                            },
+                        });
+                    } else {
+                        self.set_status(StatusKind::Error, "no permission to edit policy");
+                    }
+                }
             }
         }
     }
@@ -510,6 +710,11 @@ impl<V: VaultApi + 'static> App<V> {
                 self.state = AppState::Main(Mode::Secrets);
             }
         }
+        if self.state == AppState::Main(Mode::Policies)
+            && let Some(name) = self.selected_policy_name()
+        {
+            self.policy_preview_error = Some((name, message.to_owned()));
+        }
         self.set_status(StatusKind::Error, message);
     }
 
@@ -555,6 +760,7 @@ impl<V: VaultApi + 'static> App<V> {
             AppState::ConfigInput | AppState::Main(Mode::Config) => Page::Config,
             AppState::Main(Mode::Engines) => Page::Engines,
             AppState::Main(Mode::Secrets) => Page::Secrets,
+            AppState::Main(Mode::Policies) => Page::Policies,
             AppState::Main(Mode::SecretData) => Page::SecretData,
             AppState::Main(Mode::Token) => Page::Token,
         }
@@ -599,6 +805,47 @@ impl<V: VaultApi + 'static> App<V> {
             keys,
             selected: ui.selected,
             mode: ui.mode.clone(),
+        })
+    }
+
+    /// Builds the pure policies render model.
+    pub fn policies_model(&self) -> PoliciesModel {
+        let entries = self.store.policies().to_vec();
+        let preview = if entries.is_empty() {
+            PolicyPreview::Empty
+        } else if let Some(name) = self.selected_policy_name() {
+            if let Some(document) = self.store.policy_document(&name) {
+                PolicyPreview::Loaded {
+                    name,
+                    policy: document.policy.clone(),
+                }
+            } else if let Some((error_name, message)) = &self.policy_preview_error {
+                if error_name == &name {
+                    PolicyPreview::Error {
+                        name,
+                        message: message.clone(),
+                    }
+                } else {
+                    PolicyPreview::Loading { name }
+                }
+            } else {
+                PolicyPreview::Loading { name }
+            }
+        } else {
+            PolicyPreview::Empty
+        };
+        PoliciesModel {
+            entries,
+            selected: self.policies_selected,
+            preview,
+        }
+    }
+
+    /// Builds the pure command-line render model.
+    pub fn command_line_model(&self) -> Option<CommandLineModel> {
+        self.command_line.as_ref().map(|state| CommandLineModel {
+            input: state.input.clone(),
+            error: state.error.clone(),
         })
     }
 
@@ -671,13 +918,17 @@ impl<V: VaultApi + 'static> App<V> {
             return;
         };
         draw_header(frame, *header_area, &self.header_model(), &self.theme);
-        draw_commands(
-            frame,
-            *commands_area,
-            self.commands_page(),
-            self.permission(),
-            &self.theme,
-        );
+        if let Some(model) = self.command_line_model() {
+            draw_command_line(frame, *commands_area, &model, &self.theme);
+        } else {
+            draw_commands(
+                frame,
+                *commands_area,
+                self.commands_page(),
+                self.permission(),
+                &self.theme,
+            );
+        }
         match self.state {
             AppState::ConfigInput => draw_modal(
                 frame,
@@ -696,6 +947,9 @@ impl<V: VaultApi + 'static> App<V> {
             AppState::Main(Mode::Secrets) => {
                 draw_secrets(frame, *body_area, &self.secrets_model(), &self.theme);
             }
+            AppState::Main(Mode::Policies) => {
+                draw_policies(frame, *body_area, &self.policies_model(), &self.theme);
+            }
             AppState::Main(Mode::SecretData) => {
                 if let Some(model) = self.secret_data_model() {
                     draw_secret_data(frame, *body_area, &model, &self.theme);
@@ -710,6 +964,7 @@ impl<V: VaultApi + 'static> App<V> {
                 kind: prompt.kind,
                 input: prompt.input.clone(),
                 error: prompt.error.clone(),
+                detail: prompt.detail.clone(),
             };
             draw_prompt(frame, *body_area, &model, &self.theme);
         }
@@ -870,6 +1125,52 @@ impl<V: VaultApi + 'static> App<V> {
             | KeyCode::KeypadBegin
             | KeyCode::Media(_)
             | KeyCode::Modifier(_) => false,
+        }
+    }
+
+    fn handle_policies_input(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.state = AppState::Main(Mode::Engines);
+                false
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.policies_selected = self.policies_selected.saturating_sub(1);
+                self.policy_can_write = false;
+                self.policy_preview_error = None;
+                self.pending_policy_edit = None;
+                self.spawn_selected_policy_load();
+                self.spawn_selected_policy_capabilities();
+                false
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.policies_selected =
+                    next_index(self.policies_selected, self.store.policies().len());
+                self.policy_can_write = false;
+                self.policy_preview_error = None;
+                self.pending_policy_edit = None;
+                self.spawn_selected_policy_load();
+                self.spawn_selected_policy_capabilities();
+                false
+            }
+            KeyCode::Enter => {
+                self.spawn_selected_policy_load();
+                false
+            }
+            KeyCode::Char('e') => {
+                self.edit_selected_policy();
+                false
+            }
+            KeyCode::Char('n') => {
+                self.prompt = Some(PromptState {
+                    kind: PromptKind::NewPolicy,
+                    input: String::new(),
+                    error: None,
+                    detail: None,
+                });
+                false
+            }
+            _ => false,
         }
     }
 
@@ -1596,6 +1897,90 @@ impl<V: VaultApi + 'static> App<V> {
         });
     }
 
+    fn spawn_load_policies(&mut self) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            match tokio::time::timeout(TASK_TIMEOUT, vault.list_acl_policies()).await {
+                Ok(Ok(entries)) => Msg::PoliciesLoaded {
+                    generation,
+                    entries,
+                },
+                Ok(Err(err)) => Msg::Failure {
+                    generation,
+                    message: err.message(),
+                },
+                Err(_elapsed) => timeout_msg(generation),
+            }
+        });
+    }
+
+    fn spawn_load_policy(&mut self, name: String) {
+        // Shares the caller's generation: a policy load and the capability probe
+        // spawned in the same navigation step must not supersede each other, or
+        // the load result is dropped as stale (mirrors the KV capability rule).
+        let generation = self.store.generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            match tokio::time::timeout(TASK_TIMEOUT, vault.read_acl_policy(&name)).await {
+                Ok(Ok(document)) => Msg::PolicyLoaded {
+                    generation,
+                    name,
+                    document,
+                },
+                Ok(Err(err)) => Msg::Failure {
+                    generation,
+                    message: err.message(),
+                },
+                Err(_elapsed) => timeout_msg(generation),
+            }
+        });
+    }
+
+    fn spawn_write_policy(&mut self, name: String, policy: String) {
+        let generation = self.store.bump_generation();
+        self.pending = true;
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            match tokio::time::timeout(TASK_TIMEOUT, vault.write_acl_policy(&name, &policy)).await {
+                Ok(Ok(())) => Msg::PolicyWritten { generation, name },
+                Ok(Err(err)) => Msg::Failure {
+                    generation,
+                    message: err.message(),
+                },
+                Err(_elapsed) => timeout_msg(generation),
+            }
+        });
+    }
+
+    fn spawn_policy_capabilities(&self, name: String) {
+        // Shares the caller's generation (see `spawn_load_policy`).
+        let generation = self.store.generation();
+        let path = format!("sys/policies/acl/{}", encode_acl_policy_name(&name));
+        let vault = Arc::clone(&self.vault);
+        self.spawn_msg(self.tx.clone(), async move {
+            let writable = match tokio::time::timeout(
+                TASK_TIMEOUT,
+                vault.capabilities_self(std::slice::from_ref(&path)),
+            )
+            .await
+            {
+                Ok(Ok(caps)) => caps.get(&path).is_some_and(|list| {
+                    let has = |cap: &str| list.iter().any(|entry| entry == cap);
+                    has("root") || has("create") || has("update")
+                }),
+                _ => false,
+            };
+            Msg::PolicyCapabilities {
+                generation,
+                name,
+                writable,
+            }
+        });
+    }
+
     fn open_new_secret_prompt(&mut self) {
         if !self.can_write {
             self.set_status(StatusKind::Error, "no permission to create secrets here");
@@ -1605,6 +1990,7 @@ impl<V: VaultApi + 'static> App<V> {
             kind: PromptKind::NewSecret,
             input: String::new(),
             error: None,
+            detail: None,
         });
     }
 
@@ -1615,8 +2001,6 @@ impl<V: VaultApi + 'static> App<V> {
         )
     }
 
-    /// Opens the delete confirmation for the selected leaf entry (directories
-    /// are virtual in KV2 — their secrets must be removed individually).
     fn open_delete_secret_prompt(&mut self) {
         if !self.can_delete {
             self.set_status(StatusKind::Error, "no permission to delete secrets here");
@@ -1637,6 +2021,7 @@ impl<V: VaultApi + 'static> App<V> {
             kind: PromptKind::DeleteSecret,
             input: entry.name.as_str().to_owned(),
             error: None,
+            detail: None,
         });
     }
 
@@ -1674,6 +2059,7 @@ impl<V: VaultApi + 'static> App<V> {
             kind: PromptKind::NewKey,
             input: String::new(),
             error: None,
+            detail: None,
         });
     }
 
@@ -1681,9 +2067,21 @@ impl<V: VaultApi + 'static> App<V> {
     fn handle_prompt_input(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => {
+<<<<<<< HEAD
                 self.prompt = None;
                 self.child_draft = None;
                 self.wrap_payload = None;
+=======
+                if self
+                    .prompt
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.kind == PromptKind::SavePolicy)
+                {
+                    self.pending_policy_save = None;
+                    self.set_status(StatusKind::Info, "policy save cancelled");
+                }
+                self.prompt = None;
+>>>>>>> origin/main
             }
             KeyCode::Enter => self.submit_prompt(),
             KeyCode::Backspace => {
@@ -1693,7 +2091,10 @@ impl<V: VaultApi + 'static> App<V> {
             }
             KeyCode::Char(ch) => {
                 if let Some(prompt) = self.prompt.as_mut() {
-                    if prompt.kind != PromptKind::DeleteSecret {
+                    if !matches!(
+                        prompt.kind,
+                        PromptKind::DeleteSecret | PromptKind::SavePolicy
+                    ) {
                         prompt.input.push(ch);
                     }
                 }
@@ -1707,13 +2108,30 @@ impl<V: VaultApi + 'static> App<V> {
         let Some(mut prompt) = self.prompt.take() else {
             return;
         };
+<<<<<<< HEAD
         let input = prompt.input.trim().to_owned();
         if prompt.kind.requires_input() && input.is_empty() {
             prompt.error = Some(empty_prompt_message(prompt.kind).to_owned());
+=======
+        if prompt.kind == PromptKind::SavePolicy {
+            let name = prompt.input.trim().to_owned();
+            if name.is_empty() {
+                prompt.error = Some("name cannot be empty".to_owned());
+                self.prompt = Some(prompt);
+                return;
+            }
+            self.save_policy(&name);
+            return;
+        }
+        let name = prompt.input.trim().to_owned();
+        if name.is_empty() {
+            prompt.error = Some("name cannot be empty".to_owned());
+>>>>>>> origin/main
             self.prompt = Some(prompt);
             return;
         }
         match prompt.kind {
+<<<<<<< HEAD
             PromptKind::NewSecret => self.create_secret(&input),
             PromptKind::NewKey => self.add_key(&input),
             PromptKind::DeleteSecret => self.delete_secret(&input),
@@ -1724,6 +2142,13 @@ impl<V: VaultApi + 'static> App<V> {
             PromptKind::WrapPayload => self.advance_wrap_payload(&input),
             PromptKind::WrapTtl => self.finish_wrap(&input),
             PromptKind::UnwrapToken => self.spawn_unwrap(&input),
+=======
+            PromptKind::NewSecret => self.create_secret(&name),
+            PromptKind::NewKey => self.add_key(&name),
+            PromptKind::DeleteSecret => self.delete_secret(&name),
+            PromptKind::NewPolicy => self.create_policy(&name),
+            PromptKind::SavePolicy => self.save_policy(&name),
+>>>>>>> origin/main
         }
     }
 
@@ -1753,6 +2178,7 @@ impl<V: VaultApi + 'static> App<V> {
                 kind: PromptKind::NewKey,
                 input: name.to_owned(),
                 error: Some("key already exists".to_owned()),
+                detail: None,
             });
             return;
         }
@@ -1768,6 +2194,30 @@ impl<V: VaultApi + 'static> App<V> {
             StatusKind::Info,
             format!("key '{name}' added - type a value and Ctrl+S to save"),
         );
+    }
+
+    fn create_policy(&mut self, name: &str) {
+        if let Err(message) = validate_policy_name(name) {
+            self.prompt = Some(PromptState {
+                kind: PromptKind::NewPolicy,
+                input: name.to_owned(),
+                error: Some(message),
+                detail: None,
+            });
+            return;
+        }
+        self.pending_policy_new = Some(name.to_owned());
+        self.spawn_policy_capabilities(name.to_owned());
+    }
+
+    fn save_policy(&mut self, name: &str) {
+        let Some(pending) = &self.pending_policy_save else {
+            return;
+        };
+        if pending.name != name {
+            return;
+        }
+        self.spawn_write_policy(pending.name.clone(), pending.new_policy.clone());
     }
 
     fn spawn_create_secret(&mut self, key: CacheKey) {
@@ -1816,6 +2266,159 @@ impl<V: VaultApi + 'static> App<V> {
             }
         });
     }
+
+    fn handle_command_line_input(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => self.command_line = None,
+            KeyCode::Backspace => {
+                if let Some(command_line) = self.command_line.as_mut() {
+                    command_line.input.pop();
+                }
+            }
+            KeyCode::Enter => self.submit_command_line(),
+            KeyCode::Char(ch) => {
+                if let Some(command_line) = self.command_line.as_mut() {
+                    command_line.input.push(ch);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn submit_command_line(&mut self) {
+        let Some(state) = self.command_line.as_ref() else {
+            return;
+        };
+        let other = state.input.trim().to_owned();
+        if other.is_empty() {
+            self.command_line = None;
+            return;
+        }
+        if other == "policies" {
+            self.open_policies();
+            return;
+        }
+        self.command_line = Some(CommandLineState {
+            input: state.input.clone(),
+            error: Some(format!("unknown command: {other}")),
+        });
+    }
+
+    fn open_policies(&mut self) {
+        self.command_line = None;
+        self.state = AppState::Main(Mode::Policies);
+        self.policies_selected = 0;
+        self.policy_can_write = false;
+        self.pending_policy_edit = None;
+        if self.store.policies().is_empty() {
+            self.spawn_load_policies();
+        } else {
+            self.sync_policy_selection();
+            self.spawn_selected_policy_load();
+            self.spawn_selected_policy_capabilities();
+        }
+    }
+
+    fn sync_policy_selection(&mut self) {
+        let len = self.store.policies().len();
+        if len == 0 {
+            self.policies_selected = 0;
+            return;
+        }
+        self.policies_selected = self.policies_selected.min(len - 1);
+    }
+
+    fn selected_policy_name(&self) -> Option<String> {
+        self.store
+            .policies()
+            .get(self.policies_selected)
+            .map(|entry| entry.name.clone())
+    }
+
+    fn spawn_selected_policy_load(&mut self) {
+        if let Some(name) = self.selected_policy_name() {
+            if self.store.policy_document(&name).is_none() {
+                self.spawn_load_policy(name);
+            }
+        }
+    }
+
+    fn spawn_selected_policy_capabilities(&self) {
+        if let Some(name) = self.selected_policy_name() {
+            self.spawn_policy_capabilities(name);
+        }
+    }
+
+    fn edit_selected_policy(&mut self) {
+        let Some(name) = self.selected_policy_name() else {
+            return;
+        };
+        if !self.policy_can_write {
+            self.set_status(StatusKind::Error, "no permission to edit policy");
+            return;
+        }
+        if let Some(document) = self.store.policy_document(&name) {
+            self.editor_request = Some(EditorRequest {
+                target: EditorTarget::Policy {
+                    name: name.clone(),
+                    original_policy: document.policy.clone(),
+                },
+                buffer: EditBuffer {
+                    initial_text: document.policy.clone(),
+                    file_stem: name,
+                    extension: ".hcl",
+                },
+            });
+            return;
+        }
+        self.pending_policy_edit = Some(name.clone());
+        self.set_status(
+            StatusKind::Info,
+            format!("loading policy '{name}' before editing"),
+        );
+        self.spawn_load_policy(name);
+    }
+
+    /// Takes the next pending editor request.
+    #[allow(
+        clippy::missing_const_for_fn,
+        reason = "const qualification is not important for this mutable state accessor"
+    )]
+    pub fn take_editor_request(&mut self) -> Option<EditorRequest> {
+        self.editor_request.take()
+    }
+
+    /// Completes an editor request and updates UI state from the edit outcome.
+    pub fn complete_editor_request(
+        &mut self,
+        request: EditorRequest,
+        result: Result<EditOutcome, EditorError>,
+    ) {
+        match result {
+            Err(error) => self.set_status(StatusKind::Error, error.to_string()),
+            Ok(EditOutcome::Unchanged) => self.set_status(StatusKind::Info, "No changes to save"),
+            Ok(EditOutcome::Changed(text)) => match request.target {
+                EditorTarget::Policy {
+                    name,
+                    original_policy,
+                } => {
+                    let detail = format_policy_save_detail(&original_policy, &text);
+                    self.pending_policy_save = Some(PendingPolicySave {
+                        name: name.clone(),
+                        old_policy: original_policy,
+                        new_policy: text,
+                    });
+                    self.prompt = Some(PromptState {
+                        kind: PromptKind::SavePolicy,
+                        input: name,
+                        error: None,
+                        detail: Some(detail),
+                    });
+                }
+            },
+        }
+    }
 }
 
 async fn timed<T>(
@@ -1830,6 +2433,50 @@ async fn timed<T>(
             message: err.message(),
         },
         Err(_elapsed) => timeout_msg(generation),
+    }
+}
+
+fn policy_effect(msg: &Msg) -> Option<PolicyEffect> {
+    match msg {
+        Msg::PoliciesLoaded { .. } => Some(PolicyEffect::PoliciesLoaded),
+        Msg::PolicyLoaded { name, .. } => Some(PolicyEffect::PolicyLoaded(name.clone())),
+        Msg::PolicyWritten { name, .. } => Some(PolicyEffect::PolicyWritten(name.clone())),
+        Msg::PolicyCapabilities { name, writable, .. } => Some(PolicyEffect::PolicyCapabilities {
+            name: name.clone(),
+            writable: *writable,
+        }),
+        _ => None,
+    }
+}
+
+fn validate_policy_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("name cannot be empty".to_owned());
+    }
+    if name.contains('/') {
+        return Err("name must not contain '/'".to_owned());
+    }
+    if name.contains('\n') || name.contains('\r') {
+        return Err("name must not contain newlines".to_owned());
+    }
+    Ok(())
+}
+
+fn format_policy_save_detail(old_policy: &str, new_policy: &str) -> String {
+    format!(
+        "{} bytes / {} lines → {} bytes / {} lines",
+        old_policy.len(),
+        line_count(old_policy),
+        new_policy.len(),
+        line_count(new_policy)
+    )
+}
+
+fn line_count(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        text.lines().count()
     }
 }
 
@@ -1907,14 +2554,17 @@ mod tests {
 
     use super::*;
     use crate::clipboard::ClipboardError;
-    use crate::model::KvMetadata;
+    use crate::model::{KvMetadata, PolicyDocument, PolicyEntry};
     use crate::vault::VaultApi;
 
     #[derive(Debug)]
     struct FakeVault {
         engines: Vec<SecretEntry>,
+        policies: Vec<PolicyEntry>,
         listings: Mutex<HashMap<(SecretPath, SecretPath), Vec<SecretEntry>>>,
         data: Mutex<HashMap<(SecretPath, SecretPath), KvData>>,
+        policy_documents: Mutex<HashMap<String, PolicyDocument>>,
+        policy_writes: Mutex<Vec<(String, String)>>,
         writes: Mutex<Vec<WriteRecord>>,
         deletes: Mutex<Vec<(SecretPath, SecretPath)>>,
         writable_all: bool,
@@ -1926,8 +2576,11 @@ mod tests {
         fn default() -> Self {
             Self {
                 engines: Vec::new(),
+                policies: Vec::new(),
                 listings: Mutex::new(HashMap::new()),
                 data: Mutex::new(HashMap::new()),
+                policy_documents: Mutex::new(HashMap::new()),
+                policy_writes: Mutex::new(Vec::new()),
                 writes: Mutex::new(Vec::new()),
                 deletes: Mutex::new(Vec::new()),
                 writable_all: true,
@@ -1939,6 +2592,14 @@ mod tests {
         fn seeded() -> Arc<Self> {
             let vault = Arc::new(Self {
                 engines: vec![SecretEntry::leaf("secret")],
+                policies: vec![
+                    PolicyEntry {
+                        name: "default".to_owned(),
+                    },
+                    PolicyEntry {
+                        name: "team".to_owned(),
+                    },
+                ],
                 ..Self::default()
             });
             vault.insert_listing(
@@ -1956,6 +2617,18 @@ mod tests {
                 SecretPath::new("team/api"),
                 kv_data("old"),
             );
+            vault
+                .policy_documents
+                .lock()
+                .expect("policy documents lock")
+                .insert(
+                    "team".to_owned(),
+                    PolicyDocument {
+                        name: "team".to_owned(),
+                        policy: "path \"secret/data/team/*\" { capabilities = [\"read\"] }"
+                            .to_owned(),
+                    },
+                );
             vault
         }
 
@@ -1975,6 +2648,13 @@ mod tests {
 
         fn writes(&self) -> Vec<WriteRecord> {
             self.writes.lock().expect("writes lock").clone()
+        }
+
+        fn policy_writes(&self) -> Vec<(String, String)> {
+            self.policy_writes
+                .lock()
+                .expect("policy writes lock")
+                .clone()
         }
     }
 
@@ -2111,6 +2791,7 @@ mod tests {
             }
         }
 
+<<<<<<< HEAD
         fn renew_token_self(&self) -> impl Future<Output = Result<(), VaultError>> + Send {
             async move { Ok(()) }
         }
@@ -2151,6 +2832,52 @@ mod tests {
         ) -> impl Future<Output = Result<String, VaultError>> + Send {
             async move { Ok("{\n  \"password\": \"hunter2\"\n}".to_owned()) }
         }
+=======
+        fn list_acl_policies(
+            &self,
+        ) -> impl Future<Output = Result<Vec<PolicyEntry>, VaultError>> + Send {
+            async move { Ok(self.policies.clone()) }
+        }
+
+        fn read_acl_policy(
+            &self,
+            name: &str,
+        ) -> impl Future<Output = Result<PolicyDocument, VaultError>> + Send {
+            let key = name.to_owned();
+            async move {
+                self.policy_documents
+                    .lock()
+                    .expect("policy documents lock")
+                    .get(&key)
+                    .cloned()
+                    .ok_or_else(|| VaultError::Api {
+                        status: 404,
+                        path: format!("sys/policies/acl/{key}"),
+                        detail: "missing".to_owned(),
+                    })
+            }
+        }
+
+        fn write_acl_policy(
+            &self,
+            name: &str,
+            policy: &str,
+        ) -> impl Future<Output = Result<(), VaultError>> + Send {
+            let name = name.to_owned();
+            let policy = policy.to_owned();
+            async move {
+                self.policy_writes
+                    .lock()
+                    .expect("policy writes lock")
+                    .push((name.clone(), policy.clone()));
+                self.policy_documents
+                    .lock()
+                    .expect("policy documents lock")
+                    .insert(name.clone(), PolicyDocument { name, policy });
+                Ok(())
+            }
+        }
+>>>>>>> origin/main
     }
 
     #[derive(Debug, Default)]
@@ -2434,6 +3161,321 @@ mod tests {
         // Then: no prompt opens and a permission error is shown.
         assert_eq!(app.prompt, None);
         assert_eq!(app.status.as_ref().map(|s| s.kind), Some(StatusKind::Error));
+    }
+
+    #[test]
+    fn command_line_switches_to_policies() {
+        let (mut app, _rx, _vault) = test_app();
+        app.handle_input(key(KeyCode::Char(':')));
+        for ch in "policies".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        assert_eq!(app.state, AppState::Main(Mode::Policies));
+        assert!(app.command_line.is_none());
+    }
+
+    #[test]
+    fn command_line_unknown_sets_error() {
+        let (mut app, _rx, _vault) = test_app();
+        app.handle_input(key(KeyCode::Char(':')));
+        app.handle_input(key(KeyCode::Char('x')));
+        app.handle_input(key(KeyCode::Enter));
+        assert_eq!(
+            app.command_line
+                .as_ref()
+                .and_then(|state| state.error.clone()),
+            Some("unknown command: x".to_owned())
+        );
+    }
+
+    #[test]
+    fn colon_in_config_modal_is_typed_not_a_command() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::ConfigInput;
+
+        app.handle_input(key(KeyCode::Char(':')));
+
+        assert!(app.command_line.is_none());
+        assert_eq!(app.modal_addr, ":");
+    }
+
+    #[test]
+    fn policies_model_shows_entries() {
+        let (mut app, _rx, _vault) = test_app();
+        let generation = app.store.bump_generation();
+        app.apply(Msg::PoliciesLoaded {
+            generation,
+            entries: vec![PolicyEntry {
+                name: "default".to_owned(),
+            }],
+        });
+        let model = app.policies_model();
+        assert_eq!(model.entries.len(), 1);
+    }
+
+    #[test]
+    fn policies_enter_triggers_loading_preview_when_missing_cache() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Policies);
+        let generation = app.store.bump_generation();
+        app.apply(Msg::PoliciesLoaded {
+            generation,
+            entries: vec![PolicyEntry {
+                name: "team".to_owned(),
+            }],
+        });
+        app.handle_input(key(KeyCode::Enter));
+        let model = app.policies_model();
+        assert!(matches!(model.preview, PolicyPreview::Loading { .. }));
+    }
+
+    #[test]
+    fn policy_navigation_shares_generation_so_loads_are_not_dropped() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Policies);
+        let generation = app.store.bump_generation();
+        app.apply(Msg::PoliciesLoaded {
+            generation,
+            entries: vec![
+                PolicyEntry {
+                    name: "alpha".to_owned(),
+                },
+                PolicyEntry {
+                    name: "beta".to_owned(),
+                },
+            ],
+        });
+        let before = app.store.generation();
+
+        // When: navigation moves the selection (spawns a load + capability probe).
+        app.handle_input(key(KeyCode::Char('j')));
+
+        // Then: the load/probe rode the current generation instead of bumping, so
+        // the load result is accepted rather than dropped as stale.
+        assert_eq!(app.store.generation(), before);
+        app.apply(Msg::PolicyLoaded {
+            generation: before,
+            name: "beta".to_owned(),
+            document: PolicyDocument {
+                name: "beta".to_owned(),
+                policy: "path \"secret/*\" {}".to_owned(),
+            },
+        });
+        assert!(app.store.policy_document("beta").is_some());
+    }
+
+    #[tokio::test]
+    async fn policies_loaded_spawns_selected_preview_load() {
+        let vault = Arc::new(FakeVault {
+            policies: vec![PolicyEntry {
+                name: "team".to_owned(),
+            }],
+            ..FakeVault::default()
+        });
+        vault
+            .policy_documents
+            .lock()
+            .expect("policy documents lock")
+            .insert(
+                "team".to_owned(),
+                PolicyDocument {
+                    name: "team".to_owned(),
+                    policy: "path \"secret/*\" {}".to_owned(),
+                },
+            );
+        let (mut app, mut rx) = App::new(Config::new("http://vault", "token"), Arc::clone(&vault));
+        app.state = AppState::Main(Mode::Policies);
+
+        let generation = app.store.bump_generation();
+        app.apply(Msg::PoliciesLoaded {
+            generation,
+            entries: vec![PolicyEntry {
+                name: "team".to_owned(),
+            }],
+        });
+
+        // Then: the selected preview load is spawned after the list enters the store.
+        let mut loaded = false;
+        for _ in 0..4 {
+            let Ok(Some(msg)) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
+            else {
+                break;
+            };
+            loaded = matches!(msg, Msg::PolicyLoaded { .. });
+            app.apply(msg);
+            if loaded {
+                break;
+            }
+        }
+        assert!(loaded);
+        assert!(matches!(
+            app.policies_model().preview,
+            PolicyPreview::Loaded { .. }
+        ));
+    }
+
+    #[test]
+    fn late_policy_load_for_unselected_policy_does_not_open_editor() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Policies);
+        let generation = app.store.bump_generation();
+        app.apply(Msg::PoliciesLoaded {
+            generation,
+            entries: vec![
+                PolicyEntry {
+                    name: "alpha".to_owned(),
+                },
+                PolicyEntry {
+                    name: "beta".to_owned(),
+                },
+            ],
+        });
+        app.policy_can_write = true;
+
+        // When: `e` on alpha (document not cached yet) then move to beta.
+        app.handle_input(key(KeyCode::Char('e')));
+        assert!(app.take_editor_request().is_none());
+        app.handle_input(key(KeyCode::Char('j')));
+        assert_eq!(app.selected_policy_name().as_deref(), Some("beta"));
+
+        // Then: alpha's late document load does not open an editor for it.
+        app.apply(Msg::PolicyLoaded {
+            generation,
+            name: "alpha".to_owned(),
+            document: PolicyDocument {
+                name: "alpha".to_owned(),
+                policy: "path \"secret/*\" {}".to_owned(),
+            },
+        });
+        assert!(app.take_editor_request().is_none());
+    }
+
+    #[test]
+    fn edit_without_policy_permission_sets_error_and_no_request() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Policies);
+        app.policy_can_write = false;
+        let generation = app.store.bump_generation();
+        app.apply(Msg::PoliciesLoaded {
+            generation,
+            entries: vec![PolicyEntry {
+                name: "team".to_owned(),
+            }],
+        });
+        app.handle_input(key(KeyCode::Char('e')));
+        assert!(app.take_editor_request().is_none());
+        assert_eq!(app.status.as_ref().map(|s| s.kind), Some(StatusKind::Error));
+    }
+
+    #[test]
+    fn edit_with_cached_policy_emits_editor_request() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Policies);
+        let generation = app.store.bump_generation();
+        app.apply(Msg::PoliciesLoaded {
+            generation,
+            entries: vec![PolicyEntry {
+                name: "team".to_owned(),
+            }],
+        });
+        app.apply(Msg::PolicyLoaded {
+            generation,
+            name: "team".to_owned(),
+            document: PolicyDocument {
+                name: "team".to_owned(),
+                policy: "path \"secret/*\" {}".to_owned(),
+            },
+        });
+        app.policy_can_write = true;
+        app.handle_input(key(KeyCode::Char('e')));
+        let request = app.take_editor_request();
+        assert!(request.is_some());
+        assert_eq!(
+            request.as_ref().map(|value| value.buffer.extension),
+            Some(".hcl")
+        );
+    }
+
+    #[test]
+    fn complete_editor_changed_opens_save_prompt() {
+        let (mut app, _rx, _vault) = test_app();
+        let request = EditorRequest {
+            target: EditorTarget::Policy {
+                name: "team".to_owned(),
+                original_policy: "old".to_owned(),
+            },
+            buffer: EditBuffer {
+                initial_text: "old".to_owned(),
+                file_stem: "team".to_owned(),
+                extension: ".hcl",
+            },
+        };
+        app.complete_editor_request(request, Ok(EditOutcome::Changed("new".to_owned())));
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::SavePolicy)
+        );
+    }
+
+    #[tokio::test]
+    async fn save_policy_confirm_writes_and_sets_success() {
+        let (mut app, mut rx, vault) = test_app();
+        let request = EditorRequest {
+            target: EditorTarget::Policy {
+                name: "team".to_owned(),
+                original_policy: "old".to_owned(),
+            },
+            buffer: EditBuffer {
+                initial_text: "old".to_owned(),
+                file_stem: "team".to_owned(),
+                extension: ".hcl",
+            },
+        };
+        app.complete_editor_request(request, Ok(EditOutcome::Changed("new".to_owned())));
+        app.handle_input(key(KeyCode::Enter));
+        for _ in 0..4 {
+            let Some(msg) = rx.recv().await else {
+                break;
+            };
+            app.apply(msg);
+            if app
+                .status
+                .as_ref()
+                .is_some_and(|status| status.text == "policy 'team' saved")
+            {
+                break;
+            }
+        }
+        assert!(
+            vault
+                .policy_writes()
+                .iter()
+                .any(|(name, policy)| name == "team" && policy == "new")
+        );
+        assert_eq!(
+            app.status.as_ref().map(|status| status.text.as_str()),
+            Some("policy 'team' saved")
+        );
+    }
+
+    #[test]
+    fn new_policy_prompt_to_capability_to_editor_request() {
+        let (mut app, _rx, _vault) = test_app();
+        app.state = AppState::Main(Mode::Policies);
+        app.handle_input(key(KeyCode::Char('n')));
+        for ch in "newpolicy".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        let generation = app.store.generation();
+        app.apply(Msg::PolicyCapabilities {
+            generation,
+            name: "newpolicy".to_owned(),
+            writable: true,
+        });
+        assert!(app.take_editor_request().is_some());
     }
 
     #[test]

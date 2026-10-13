@@ -10,9 +10,13 @@ use std::future::Future;
 use serde_json::Value;
 
 pub use self::client::VaultClient;
+<<<<<<< HEAD
 use crate::model::{
     HealthInfo, KvData, MintedToken, SecretEntry, TokenCreateRequest, TokenInfo, WrappedToken,
 };
+=======
+use crate::model::{HealthInfo, KvData, PolicyDocument, PolicyEntry, SecretEntry, TokenInfo};
+>>>>>>> origin/main
 use crate::path::SecretPath;
 
 pub mod client;
@@ -124,6 +128,7 @@ pub trait VaultApi: Send + Sync {
         paths: &[String],
     ) -> impl Future<Output = Result<BTreeMap<String, Vec<String>>, VaultError>> + Send;
 
+<<<<<<< HEAD
     /// Renews the active token (`auth/token/renew-self`).
     fn renew_token_self(&self) -> impl Future<Output = Result<(), VaultError>> + Send;
 
@@ -148,4 +153,38 @@ pub trait VaultApi: Send + Sync {
         &self,
         wrapping_token: &str,
     ) -> impl Future<Output = Result<String, VaultError>> + Send;
+=======
+    /// Lists ACL policies from `sys/policies/acl`.
+    fn list_acl_policies(
+        &self,
+    ) -> impl Future<Output = Result<Vec<PolicyEntry>, VaultError>> + Send;
+
+    /// Reads one ACL policy document from `sys/policies/acl/{name}`.
+    fn read_acl_policy(
+        &self,
+        name: &str,
+    ) -> impl Future<Output = Result<PolicyDocument, VaultError>> + Send;
+
+    /// Writes an ACL policy document to `sys/policies/acl/{name}`.
+    fn write_acl_policy(
+        &self,
+        name: &str,
+        policy: &str,
+    ) -> impl Future<Output = Result<(), VaultError>> + Send;
+}
+
+/// Percent-encodes an ACL policy name for use as a single URL path segment.
+pub(crate) fn encode_acl_policy_name(name: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::new();
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            write!(encoded, "%{byte:02X}").ok();
+        }
+    }
+    encoded
+>>>>>>> origin/main
 }

@@ -4,7 +4,7 @@
 **Repo:** vaultview-rs (Rust rewrite of the Go vaultview TUI)
 
 ## OVERVIEW
-Rust TUI for HashiCorp Vault and OpenBao — a k9s-style terminal UI (~3k LOC, 18 crates in `src/`). Stack: `ratatui` 0.30 + `crossterm` 0.29 + `tokio` 1.x + `vaultrs` 0.8 (+ `reqwest` for the lenient health probe). Architecture mirrors sofka (Rust k9s): async-first `select!` event loop, single `Mode` enum, `Msg`-over-`mpsc` with generation tags, small in-memory `Store`. **KV2 secret engines only.**
+Rust TUI for HashiCorp Vault and OpenBao — a k9s-style terminal UI (~3.5k LOC, 19 crates in `src/`). Stack: `ratatui` 0.30 + `crossterm` 0.29 + `tokio` 1.x + `vaultrs` 0.8 (+ `reqwest` for the lenient health/policy probes). Architecture mirrors sofka (Rust k9s): async-first `select!` event loop, single `Mode` enum, `Msg`-over-`mpsc` with generation tags, small in-memory `Store`. **KV2 secret engines + ACL policy browsing.**
 
 ## STRUCTURE
 ```
@@ -16,13 +16,22 @@ src/
 ├── store.rs       # Store (engines/secrets cache) + Msg enum + generation stale-drop
 ├── state.rs       # Mode + ViewStack breadcrumb
 ├── event.rs       # Command enum (pure; dispatch lives in app.rs)
+<<<<<<< HEAD
 ├── model.rs       # boundary types: SecretEntry, KvData, KvMetadata, TokenInfo, MintedToken, WrappedToken, HealthInfo
+=======
+├── model.rs       # boundary types: SecretEntry, KvData, KvMetadata, TokenInfo, HealthInfo, PolicyEntry, PolicyDocument
+>>>>>>> origin/main
 ├── path.rs        # SecretPath newtype — trailing-slash dir semantics (parity with Go utils)
 ├── config.rs      # Config {addr, token}; BAO_*→VAULT_* env chain + CLI token file (~/.vault-token)
 ├── clipboard.rs   # TextClipboard trait + copypasta + CommandClipboard (pbcopy/xclip/wl-copy)
+├── editor.rs      # TextEditor trait + CommandTextEditor ($VISUAL→$EDITOR), temp-file handoff
 ├── theme.rs       # semantic palette + sofka skins (catppuccin/gruvbox); default = sofka mocha
 ├── sofka.rs       # reuses ~/.config/sofka config [skin] (name + color overrides), graceful fallback
+<<<<<<< HEAD
 └── ui/            # PURE renderers: header, engines, secrets, secret_data, token, modal (+ insta snapshots)
+=======
+└── ui/            # PURE renderers: header, engines, secrets, secret_data, policies, command_line, modal, prompt (+ insta snapshots)
+>>>>>>> origin/main
 tests/vault_integration.rs  # wiremock wire-level tests of VaultClient
 scripts/dev-vault.sh + seed-vault.sh  # local `vault server -dev` + KV2 seed data
 ```
@@ -35,6 +44,8 @@ scripts/dev-vault.sh + seed-vault.sh  # local `vault server -dev` + KV2 seed dat
 | Add a vault call | `vault/mod.rs` trait + `vault/client.rs` impl | map wire types → `model.rs` types at the boundary |
 | App state transitions | `app.rs` `apply()` + `open_selected_secret_entry` etc. | Msg folding → store + state |
 | Background loads | `app.rs` `spawn_load_*` helpers | `Arc<V>` clone + generation + `Msgs` over mpsc |
+| Policy browsing (`:policies`) | `app.rs` `handle_policies_input` + `ui/policies.rs` | list + read-only preview; edit is capability-gated |
+| `$EDITOR` handoff | `editor.rs` + `main.rs` `run_editor_handoff` | App emits `EditorRequest`; `main.rs` owns terminal suspend/restore |
 | Colors | `theme.rs` | never inline colors in views |
 
 ## CONVENTIONS
@@ -53,6 +64,17 @@ scripts/dev-vault.sh + seed-vault.sh  # local `vault server -dev` + KV2 seed dat
   open secrets) and only enables `n new secret` / `a add key` when `create`/`update`
   (or `root`) is present. Probing shares the load task's generation — never bump in
   the probe or the list result is dropped as stale.
+- ACL policies: `:policies` (a `:` command bar overlay, not a `Mode`) opens the
+  root-level `Mode::Policies` page. List via `GET sys/policies/acl` (LIST verb +
+  `GET ?list=true` fallback, like KV), read via `GET sys/policies/acl/{name}` —
+  decode a `base64:`-prefixed `policy` field. The view is read-only; editing hands
+  off to `$EDITOR` (`$VISUAL` → `$EDITOR`). App emits an `EditorRequest` that
+  `main.rs` fulfils (App never touches the terminal: it disables raw mode / leaves
+  the alt screen, runs the editor, restores, then recreates the `EventStream`).
+  Save is confirmed (`PromptKind::SavePolicy`) before `PUT sys/policies/acl/{name}`.
+  Write gating probes `sys/policies/acl/{name}` for `create`/`update`/`root`.
+  Policy load and its capability probe share the caller's generation (never
+  `bump_generation` in either) so neither is dropped as stale.
 - In `SecretData` the `x/e/c/a` lookup keys are only intercepted OUTSIDE the editor;
   inside it they are literal text (`inside_secret_editor()`), so values containing
   those letters edit correctly.
@@ -64,7 +86,7 @@ scripts/dev-vault.sh + seed-vault.sh  # local `vault server -dev` + KV2 seed dat
   (policies → TTL → use limit). Minted and wrapping tokens are shown ONCE in the preview
   pane and are never cached or persisted; unwrap pretty-prints the payload.
 - Error paths: `Msg::PathNotFound` evicts the dead entry from the parent cache listing; a failed secret read while in `SecretData` backs out to `Secrets` (Go parity).
-- Tracing filter in `main.rs` defaults to `tresor=debug,off` — rustify/vaultrs log noisy errors over the `log` bridge that smear the TUI screen.
+- Tracing filter in `main.rs` defaults to `tresor=warn,off` — rustify/vaultrs log noisy errors over the `log` bridge that smear the TUI screen.
 - Theme: default = sofka's catppuccin-mocha; `sofka.rs` parses `~/.config/sofka/config.toml` + `conf.d/*.toml` (`[skin] name` + `[skin.colors]` overrides; `$SOFKA_CONFIG` supported). Bundled skins: catppuccin-{mocha,latte,frappe,macchiato}, gruvbox-dark; anything else → mocha + warn. Never fails startup.
 - `sys::health`, `list_kv_secrets`, and `read_kv_secret` are **raw reqwest calls** (`X-Vault-Token`, envelope parsed via `raw_json` helper, lenient field reads) — NOT `vaultrs::sys::health`/`kv2::list`/typed reads. Reason: OpenBao/Vault response variants use `null` for fields HashiCorp Vault sends as `""` (`performance_standby`, metadata `deletion_time`, ...); strict serde rejects `null` for `String` while Go's json decoder tolerates it. Do not "simplify" back to strict vaultrs calls. `vaultrs` is still used for `sys::mount::list` and `auth/token/lookup-self` (both verified envelope-stable).
 - `list_kv_secrets` uses the LIST verb with a **GET `?list=true` fallback on 400/403/405** — production gateways have been observed rejecting LIST over HTTP/1.1; keep the fallback, it is not dead code. `reqwest` must keep `http2` + compression features for the same reason.
@@ -83,7 +105,7 @@ scripts/dev-vault.sh + seed-vault.sh  # local `vault server -dev` + KV2 seed dat
 ```bash
 cargo run                    # dev (needs VAULT_ADDR/VAULT_TOKEN, else modal)
 tresor --check            # CLI diagnostic: health/token/engines/per-engine list, exit≠0 on failure
-cargo test                   # 80+ tests (unit + insta golden + wiremock)
+cargo test                   # 130+ tests (unit + insta golden + wiremock)
 cargo nextest run            # faster
 cargo clippy --all-targets -- -D warnings   # zero-tolerance gate
 cargo fmt --all -- --check
@@ -95,6 +117,6 @@ scripts/dev-vault.sh [stop]  # local dev vault + seed; then run with root/#root 
 
 ## NOTES
 - Golden snapshots live in `src/ui/snapshots/` + `src/snapshots/`; CI fails on pending `.snap.new`.
-- `app.rs` is ~1.4k lines (dispatch + spawns + model builders + tests) — above the 250-LOC guideline; accepted for now (orchestrator with in-file unit tests), prime split target: `app/` module (input/tasks/models).
+- `app.rs` is ~2.9k lines (dispatch + spawns + model builders + tests) — above the 250-LOC guideline; accepted for now (orchestrator with in-file unit tests), prime split target: `app/` module (input/tasks/models).
 - Public repo: `github.com/njoerd114/tresor` (remote `origin`). Dual-licensed MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`); CI + release + dependabot live under `.github/`.
 - Go parity quirks preserved: all engines listed unfiltered (KV2 assumed); secrets browsers cache per (mount, path); 404 read shows `secret '<path>' does not exist`.

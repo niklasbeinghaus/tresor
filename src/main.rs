@@ -1,6 +1,7 @@
 //! tresor binary — tokio/crossterm terminal event loop.
 
 use std::io::stdout;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,11 +20,16 @@ use secrecy::ExposeSecret as _;
 use tokio::time;
 use tresor::app::{App, AppState};
 use tresor::config::Config;
+use tresor::editor::{CommandTextEditor, EditBuffer, EditOutcome, EditorError, TextEditor};
 use tresor::path::SecretPath;
 use tresor::theme::Theme;
 use tresor::vault::{VaultApi as _, VaultClient};
 
 #[tokio::main]
+#[allow(
+    clippy::too_many_lines,
+    reason = "single terminal event-loop entry point; splitting obscures the select! flow"
+)]
 async fn main() -> Result<()> {
     // Default to our crate's own events only; third-party crates (rustify,
     // vaultrs, hyper, rustls) log noisy errors over the `log` bridge that would
@@ -87,6 +93,7 @@ async fn main() -> Result<()> {
     let mut tick = time::interval(Duration::from_secs(1));
     let mut dirty = true;
     let mut quit = false;
+    let editor = CommandTextEditor::default_editor().ok();
 
     while !quit {
         if dirty {
@@ -110,6 +117,12 @@ async fn main() -> Result<()> {
                                 }
                             } else {
                                 quit = app.handle_input(key);
+                                drain_editor_requests(
+                                    &mut app,
+                                    &mut terminal,
+                                    &mut events,
+                                    editor.as_ref(),
+                                );
                             }
                             dirty = true;
                         }
@@ -121,6 +134,12 @@ async fn main() -> Result<()> {
             maybe_msg = msg_rx.recv() => {
                 if let Some(msg) = maybe_msg {
                     app.apply(msg);
+                    drain_editor_requests(
+                        &mut app,
+                        &mut terminal,
+                        &mut events,
+                        editor.as_ref(),
+                    );
                     dirty = true;
                 }
             }
@@ -173,6 +192,75 @@ fn restore_terminal() {
     let mut out = stdout();
     if let Err(err) = execute!(out, LeaveAlternateScreen, DisableMouseCapture) {
         tracing::warn!(%err, "failed to restore terminal screen");
+    }
+}
+
+struct TerminalSuspendGuard<'a> {
+    terminal: &'a mut Terminal<CrosstermBackend<std::io::Stdout>>,
+}
+
+impl<'a> TerminalSuspendGuard<'a> {
+    const fn new(terminal: &'a mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Self {
+        Self { terminal }
+    }
+}
+
+impl Drop for TerminalSuspendGuard<'_> {
+    fn drop(&mut self) {
+        if let Err(err) = enable_raw_mode() {
+            tracing::warn!(%err, "failed to re-enable raw mode after editor handoff");
+        }
+        if let Err(err) = execute!(
+            self.terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture
+        ) {
+            tracing::warn!(%err, "failed to restore alternate screen after editor handoff");
+        }
+        if let Err(err) = self.terminal.clear() {
+            tracing::warn!(%err, "failed to clear screen after editor handoff");
+        }
+    }
+}
+
+fn run_editor_handoff(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    editor: Option<&CommandTextEditor>,
+    buffer: &EditBuffer,
+) -> Result<EditOutcome, EditorError> {
+    // Arm the restore guard before the first terminal mutation so `Drop` restores
+    // the terminal even if a suspend step fails partway.
+    let guard = TerminalSuspendGuard::new(terminal);
+    guard
+        .terminal
+        .show_cursor()
+        .map_err(|err| EditorError::Command(err.to_string()))?;
+    execute!(
+        guard.terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )
+    .map_err(|err| EditorError::Command(err.to_string()))?;
+    disable_raw_mode().map_err(|err| EditorError::Command(err.to_string()))?;
+
+    let Some(editor) = editor else {
+        return Err(EditorError::MissingEditor);
+    };
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| editor.edit(buffer))).ok();
+    drop(guard);
+    result.unwrap_or(Err(EditorError::Panicked))
+}
+
+fn drain_editor_requests(
+    app: &mut App<VaultClient>,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    events: &mut EventStream,
+    editor: Option<&CommandTextEditor>,
+) {
+    while let Some(request) = app.take_editor_request() {
+        let result = run_editor_handoff(terminal, editor, &request.buffer);
+        app.complete_editor_request(request, result);
+        *events = EventStream::new();
     }
 }
 

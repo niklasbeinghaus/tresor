@@ -1,0 +1,17 @@
+---
+source: src/ui/prompt.rs
+expression: output
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                    ┌New Policy────────────────────────────┐                    
+                    │Policy name: team                     │                    
+                    │enter confirm │ esc cancel            │                    
+                    │                                      │                    
+                    │                                      │                    
+                    │                                      │                    
+                    └──────────────────────────────────────┘
