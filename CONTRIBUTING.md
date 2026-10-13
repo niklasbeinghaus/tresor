@@ -14,7 +14,7 @@ Every commit message must follow [Conventional Commits](https://www.conventional
 
 Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`.
 
-Why: **releases are generated from commit messages.** The `release-plz` workflow on `main`
+Why: **releases are generated from commit messages.** The `release-please` workflow on `main`
 computes the next version and the CHANGELOG from them:
 
 | Commit type | Version impact |
@@ -51,11 +51,14 @@ explain in your issue or PR how it avoids the "rare / multi-mode / high-blast-ra
 ## Release process (automated)
 
 ```
-merge to main ──► release-plz opens/updates a "release" PR (version + CHANGELOG)
-merge that PR ──► release-plz creates the tag + GitHub Release
+merge to main ──► release-please opens/updates a "chore(main): release X.Y.Z" PR
+                  (Cargo.toml + Cargo.lock + CHANGELOG.md)
+merge that PR ──► release-please creates the git tag + GitHub Release
 tag push      ──► release.yaml builds all targets and attaches binaries
                   (tarballs/zip + .deb/.rpm/.apk via nfpm)
 ```
+
+No crates.io publishing is involved (tresor distributes binaries); `publish` stays off.
 
 ## Code conventions
 
