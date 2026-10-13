@@ -88,7 +88,7 @@ copypasta = "0.10"
 # OpenBao omits/`null`s fields vaultrs requires strictly, and production
 # gateways behave differently per HTTP version — HTTP/2 + compression must be
 # on (the Go client negotiates h2 by default; h1-only requests got 400s).
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, features = [
     "rustls-tls",
     "json",
     "http2",
