@@ -104,9 +104,9 @@ impl AsRef<str> for SecretPath {
 
 #[cfg(test)]
 mod tests {
-    use super::SecretPath;
-
     use proptest::prelude::*;
+
+    use super::SecretPath;
 
     #[test]
     fn parent_when_dir() {

@@ -1,13 +1,11 @@
 //! Single-field input prompt (new secret name / new key name), rendered as a
 //! centered popup over the body area.
 
-use ratatui::{
-    Frame,
-    layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
-};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::theme::Theme;
 
@@ -124,9 +122,11 @@ const fn centered(area: Rect, width: u16, height: u16) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use insta::assert_snapshot;
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
 
     fn render(kind: PromptKind, input: &str, error: Option<&str>) -> String {
         let backend = TestBackend::new(80, 20);

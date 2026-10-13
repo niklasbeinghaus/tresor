@@ -1,12 +1,10 @@
 //! Vault configuration popup renderer.
 
-use ratatui::{
-    Frame,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
-    text::Line,
-    widgets::{Block, Borders, Clear, Paragraph},
-};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::theme::Theme;
 
@@ -148,7 +146,8 @@ fn mask_token(token: &str) -> String {
     reason = "snapshot test helper follows the contract supplied by the task"
 )]
 mod tests {
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     use super::*;
 

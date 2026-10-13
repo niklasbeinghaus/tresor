@@ -1,0 +1,21 @@
+{
+  "version": "0.1.0",
+  "description": "A k9s-style terminal UI for HashiCorp Vault and OpenBao",
+  "homepage": "https://github.com/njoerd114/tresor",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/njoerd114/tresor/releases/download/v0.1.0/tresor-x86_64-pc-windows-msvc.zip",
+      "hash": "REPLACE_WITH_SHA256_FROM_RELEASE"
+    }
+  },
+  "bin": "tresor-x86_64-pc-windows-msvc.exe",
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/njoerd114/tresor/releases/download/v$version/tresor-x86_64-pc-windows-msvc.zip"
+      }
+    }
+  }
+}

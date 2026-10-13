@@ -32,8 +32,6 @@ jobs:
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
-        env:
-          RUSTFLAGS: ""
 
       - name: Package (unix)
         if: ${{ !contains(matrix.target, 'windows') }}
@@ -50,9 +48,57 @@ jobs:
           cp "target/${{ matrix.target }}/release/tresor.exe" "tresor-${{ matrix.target }}.exe"
           7z a "tresor-${{ matrix.target }}.zip" "tresor-${{ matrix.target }}.exe"
 
+      # Linux binaries are reused to build distro packages in the next job.
+      - name: Upload linux binary for packaging
+        if: ${{ contains(matrix.target, 'linux') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.target }}
+          path: tresor-${{ matrix.target }}
+
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             tresor-*.tar.gz
             tresor-*.zip
           generate_release_notes: true
+
+  packages:
+    name: packages (deb/rpm/apk)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: linux-*
+
+      - name: Install nfpm
+        run: |
+          set -euo pipefail
+          curl -sfL https://github.com/goreleaser/nfpm/releases/latest/download/nfpm_amd64.tar.gz \
+            | tar -xz -C /usr/local/bin nfpm
+
+      - name: Build packages
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          declare -A ARCH=( [amd64]="x86_64-unknown-linux-gnu" [arm64]="aarch64-unknown-linux-gnu" )
+          for arch in "${!ARCH[@]}"; do
+            target="${ARCH[$arch]}"
+            cp "artifacts/linux-${target}/tresor-${target}" "./tresor-linux-${arch}"
+            for packager in deb rpm apk; do
+              NFPM_ARCH="$arch" NFPM_VERSION="$VERSION" \
+                nfpm package --packager "$packager" --config nfpm.yaml \
+                --target "dist/tresor_${VERSION}_linux_${arch}.${packager}"
+            done
+          done
+          ls -l dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: false

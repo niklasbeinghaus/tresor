@@ -44,8 +44,12 @@ pub fn row_line(
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::widgets::Paragraph;
+
     use super::*;
-    use ratatui::{Terminal, backend::TestBackend, layout::Rect, widgets::Paragraph};
 
     fn render_row(selected: Option<usize>, width: u16) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(width, 1);

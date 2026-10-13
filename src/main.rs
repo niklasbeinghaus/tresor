@@ -1,24 +1,27 @@
 //! tresor binary — tokio/crossterm terminal event loop.
 
-use std::{io::stdout, sync::Arc, time::Duration};
+use std::io::stdout;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
+};
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt as _;
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use secrecy::ExposeSecret as _;
 use tokio::time;
-use tresor::{
-    app::{App, AppState},
-    config::Config,
-    path::SecretPath,
-    theme::Theme,
-    vault::{VaultApi as _, VaultClient},
-};
+use tresor::app::{App, AppState};
+use tresor::config::Config;
+use tresor::path::SecretPath;
+use tresor::theme::Theme;
+use tresor::vault::{VaultApi as _, VaultClient};
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -1,15 +1,14 @@
 //! Secret key/value data renderer.
 
-use ratatui::{
-    Frame,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
-};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use tui_textarea::TextArea;
 
-use crate::{constants::MASK, theme::Theme};
+use crate::constants::MASK;
+use crate::theme::Theme;
 
 /// Key row shown in the secret data list pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,7 +146,9 @@ fn draw_editor(frame: &mut Frame<'_>, area: Rect, key: &str, text: &str, theme: 
     reason = "snapshot test helper follows the contract supplied by the task"
 )]
 mod tests {
-    use ratatui::{Terminal, backend::TestBackend, style::Color};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
 
     use super::*;
 
