@@ -249,7 +249,6 @@ pub struct SecretDataUi {
     pub original_data: BTreeMap<String, SecretString>,
 }
 
-<<<<<<< HEAD
 /// Version-preview state owned by the app.
 #[derive(Debug, Clone)]
 pub struct VersionPreviewUi {
@@ -276,7 +275,8 @@ pub struct VersionsUi {
     pub selected: usize,
     /// Optional loaded preview for the selected version.
     pub preview: Option<VersionPreviewUi>,
-=======
+}
+
 /// Transient payload shown in the token inspector's preview pane.
 #[derive(Debug, Clone)]
 enum TokenPane {
