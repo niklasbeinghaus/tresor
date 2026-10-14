@@ -1,0 +1,16 @@
+---
+source: src/ui/palette.rs
+expression: output
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+             ┌Commands───────────────────────────────────────────┐              
+             │:fi█                                               │              
+             │enter run │ esc cancel                             │              
+             │:filter  filter the focused list                   │              
+             └───────────────────────────────────────────────────┘

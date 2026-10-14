@@ -2,9 +2,11 @@
 
 pub mod command_line;
 pub mod commands;
+pub mod contexts;
 pub mod engines;
 pub mod header;
 pub mod modal;
+pub mod palette;
 pub mod policies;
 pub mod prompt;
 pub mod row;

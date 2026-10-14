@@ -16,6 +16,10 @@ supports **KV2 secret engines only** (same as the Go version).
 
 - List all secret engines
 - Hierarchical secret browser with per-path caching
+- Named connection **profiles** (`~/.config/tresor/config.toml`), switchable at
+  runtime with the k9s-style `:ctx` palette
+- `/` fuzzy filter over the focused list (engines, secrets, keys) with a live
+  match count in the command bar
 - `<x>` reveal secret value (preview pane)
 - `<e>` edit secret value (inline textarea), `Ctrl+S` save
 - `<c>` copy secret value to the system clipboard
@@ -41,6 +45,8 @@ tracked with their reasoning in [`docs/out-of-scope.md`](docs/out-of-scope.md).
 
 | Key | Action |
 |---|---|
+| `:` | command palette — `:ctx` switch profile, `:filter`, `:quit` |
+| `/` | fuzzy filter the focused list (`Esc` clears) |
 | `Enter` | select / drill down / open secret |
 | `Esc` | back one level / cancel |
 | `↑ ↓` / `j k` | move selection |
@@ -210,6 +216,37 @@ Create/edit commands are **permission-aware**: the app probes
 `a add key` (and allows the actions) when your token can `create`/`update`
 there. Attempting them without permission shows a clear status error.
 
+## Profiles & contexts
+
+Define named connection profiles in `~/.config/tresor/config.toml` (or
+`$TRESOR_CONFIG/config.toml`). A profile names an address and points at a token
+**file** or a token **command** — raw tokens are never stored inline:
+
+```toml
+current = "dev"
+
+[profiles.dev]
+addr = "http://127.0.0.1:8200"
+token_file = "~/.vault-token"
+
+[profiles.prod]
+addr = "https://vault.example:8200"
+token_command = "pass show vault/prod-token"
+```
+
+- `current` (optional) is the profile used at startup when no `BAO_*`/`VAULT_*`
+  environment config is present.
+- `token_file` is read and trimmed (`~` expands to the home directory).
+- `token_command` runs through the shell (`sh -c` / `cmd /C`) with a 10s
+  timeout; its trimmed stdout is the token. **Config files are executable trust
+  boundaries** — only point `token_command` at commands you trust.
+- A profile with both or neither token source, an inline `token = "..."`, or an
+  empty `addr` is skipped with a warning.
+
+Startup precedence: environment config (`BAO_*`/`VAULT_*`) → `current` profile →
+the configuration modal. Press `:` and run `ctx` to switch profiles at runtime;
+the picker is type-to-filter and marks the connected profile with `●`.
+
 ## Theme
 
 The default palette matches **sofka.rs**'s default skin (catppuccin-mocha).
@@ -239,7 +276,7 @@ Seed data (idempotent): `secret/apps/web/db-creds`, `secret/apps/web/api-key`,
 ## Tests
 
 ```bash
-cargo test                     # 72 tests: unit + insta golden snapshots + wiremock vault-client integration
+cargo test                     # unit + insta golden snapshots + wiremock vault-client integration
 cargo nextest run              # (if installed) faster runner
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
@@ -260,7 +297,10 @@ src/
 ├── state.rs       # Mode + ViewStack (breadcrumb navigation)
 ├── model.rs       # boundary-parsed types (SecretEntry, KvData, TokenInfo, HealthInfo)
 ├── path.rs        # SecretPath newtype (trailing-slash semantics)
-├── ui/            # pure view renderers: header, engines, secrets, secret_data, modal
+├── profiles.rs    # named connection profiles (token file/command) from config.toml
+├── fuzzy.rs       # fuzzy matching (command palette, profile picker, list filter)
+├── ui/            # pure view renderers: header, engines, secrets, secret_data, modal,
+│                  #   prompt, palette, contexts
 ├── theme.rs       # semantic color palette
 ├── clipboard.rs   # copypasta + pbcopy-wl-copy fallback
 └── event.rs       # Command enum

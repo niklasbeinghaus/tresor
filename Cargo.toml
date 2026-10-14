@@ -101,6 +101,9 @@ reqwest = { version = "0.13", default-features = false, features = [
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
+# Fuzzy scoring for the command palette, profile picker and list filter —
+# the same matcher sofka uses (MPL-2.0, already allow-listed in deny.toml).
+nucleo-matcher = "0.3"
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
