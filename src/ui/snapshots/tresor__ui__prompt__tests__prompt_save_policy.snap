@@ -1,0 +1,17 @@
+---
+source: src/ui/prompt.rs
+expression: out
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                    ┌Save Policy───────────────────────────┐                    
+                    │save policy 'team' ?                  │                    
+                    │10 bytes / 1 lines → 20 bytes / 2 line│                    
+                    │                                      │                    
+                    │                                      │                    
+                    │                                      │                    
+                    └──────────────────────────────────────┘

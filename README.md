@@ -16,6 +16,10 @@ supports **KV2 secret engines only** (same as the Go version).
 
 - List all secret engines
 - Hierarchical secret browser with per-path caching
+- Named connection **profiles** (`~/.config/tresor/config.toml`), switchable at
+  runtime with the k9s-style `:ctx` palette
+- `/` fuzzy filter over the focused list (engines, secrets, keys) with a live
+  match count in the command bar
 - `<x>` reveal secret value (preview pane)
 - `<e>` edit secret value (inline textarea), `Ctrl+S` save
 - `<c>` copy secret value to the system clipboard
@@ -23,6 +27,12 @@ supports **KV2 secret engines only** (same as the Go version).
 - Version pane actions: `Enter` preview, `r` restore, `u` undelete, `X` destroy (typed confirmation)
 - Secret-data action: `d` soft-delete latest version
 - `Ctrl+R` hard reload of the current path (with 404 backtrack)
+- Token inspector (`:token`): `lookup-self` details, renew-self, and child-token
+  creation (policies + TTL + use limit) — the minted token is shown once and copyable
+- Response wrapping: `:unwrap` a wrapping token into a pretty-printed payload, or
+  `:wrap` a JSON payload with an optional TTL
+- `:policies` browses ACL policies with a read-only preview pane
+- `<e>` authors/edits a policy in your `$EDITOR` (never an in-TUI editor), `<n>` creates one
 - Vault header: address, sealed state, version, token policies/expiry
 - Config modal when `VAULT_ADDR`/`VAULT_TOKEN` are missing
 - Color-coded status line (errors/errors/info/success, auto-clear after 5s)
@@ -38,13 +48,17 @@ tracked with their reasoning in [`docs/out-of-scope.md`](docs/out-of-scope.md).
 
 | Key | Action |
 |---|---|
+| `:` | command palette — `:ctx` switch profile, `:filter`, `:quit` |
+| `/` | fuzzy filter the focused list (`Esc` clears) |
 | `Enter` | select / drill down / open secret |
 | `Esc` | back one level / cancel |
 | `↑ ↓` / `j k` | move selection |
 | `Tab` | next key (secret data view) |
+| `:` | open the command bar (`:policies` opens the ACL policy browser) |
 | `x` | reveal secret value |
-| `e` | edit secret value |
+| `e` | edit secret value; in the policies view, edit the selected policy in `$EDITOR` |
 | `c` | copy secret value |
+<<<<<<< HEAD
 | `v` | open versions (secret-data view) |
 | `n` | new secret (secrets view, when permitted) |
 | `D` | metadata-delete secret — with confirmation (secrets view, when permitted) |
@@ -53,10 +67,36 @@ tracked with their reasoning in [`docs/out-of-scope.md`](docs/out-of-scope.md).
 | `r` | restore selected version as latest (versions view, when permitted) |
 | `u` | undelete selected soft-deleted version (versions view, when permitted) |
 | `X` | destroy selected version — typed confirmation (versions view, when permitted) |
+=======
+| `n` | new secret / new policy (when permitted) |
+| `d` | delete secret — with confirmation (secrets view, when permitted) |
+>>>>>>> origin/main
 | `a` | add key to the open secret (when permitted) |
 | `Ctrl+S` | save edits |
 | `Ctrl+R` | hard refresh current path |
+| `:` | command palette (`token`, `t`, `unwrap`, `u`, `wrap`, `w`) |
+| `r` | renew the active token (token inspector) |
+| `n` | create a child token (token inspector, when permitted) |
+| `w` | wrap a JSON payload (token inspector, when permitted) |
+| `u` | unwrap a wrapping token (token inspector) |
+| `c` | copy the shown token/payload (token inspector) |
 | `Ctrl+C` | quit |
+
+## Policies
+
+Open the ACL policy browser with the `:policies` command (`:` opens the command
+bar at the bottom of the screen). The left pane lists every ACL policy
+(`GET sys/policies/acl`, with a `GET ?list=true` fallback for gateways that
+reject the `LIST` verb); the right pane previews the selected policy's HCL text
+read-only. Policy text that Vault returns `base64:`-prefixed is decoded for
+display.
+
+Editing never happens inside the TUI: `<e>` suspends the interface and hands the
+policy to `$EDITOR` (`$VISUAL` first, then `$EDITOR`), then reads the result back.
+If the text changed you get a confirmation prompt before `<Enter>` `PUT`s it to
+`sys/policies/acl/{name}`. `<n>` authors a brand-new policy the same way. The
+edit action is **capability-gated**: tresor probes `sys/policies/acl/{name}` and
+only offers it when your token holds `create`, `update`, or `root` there.
 
 ## Install
 
@@ -190,6 +230,37 @@ Create/edit commands are **permission-aware**: the app probes
 `a add key` (and allows the actions) when your token can `create`/`update`
 there. Attempting them without permission shows a clear status error.
 
+## Profiles & contexts
+
+Define named connection profiles in `~/.config/tresor/config.toml` (or
+`$TRESOR_CONFIG/config.toml`). A profile names an address and points at a token
+**file** or a token **command** — raw tokens are never stored inline:
+
+```toml
+current = "dev"
+
+[profiles.dev]
+addr = "http://127.0.0.1:8200"
+token_file = "~/.vault-token"
+
+[profiles.prod]
+addr = "https://vault.example:8200"
+token_command = "pass show vault/prod-token"
+```
+
+- `current` (optional) is the profile used at startup when no `BAO_*`/`VAULT_*`
+  environment config is present.
+- `token_file` is read and trimmed (`~` expands to the home directory).
+- `token_command` runs through the shell (`sh -c` / `cmd /C`) with a 10s
+  timeout; its trimmed stdout is the token. **Config files are executable trust
+  boundaries** — only point `token_command` at commands you trust.
+- A profile with both or neither token source, an inline `token = "..."`, or an
+  empty `addr` is skipped with a warning.
+
+Startup precedence: environment config (`BAO_*`/`VAULT_*`) → `current` profile →
+the configuration modal. Press `:` and run `ctx` to switch profiles at runtime;
+the picker is type-to-filter and marks the connected profile with `●`.
+
 ## Theme
 
 The default palette matches **sofka.rs**'s default skin (catppuccin-mocha).
@@ -219,7 +290,7 @@ Seed data (idempotent): `secret/apps/web/db-creds`, `secret/apps/web/api-key`,
 ## Tests
 
 ```bash
-cargo test                     # 72 tests: unit + insta golden snapshots + wiremock vault-client integration
+cargo test                     # unit + insta golden snapshots + wiremock vault-client integration
 cargo nextest run              # (if installed) faster runner
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
@@ -240,7 +311,10 @@ src/
 ├── state.rs       # Mode + ViewStack (breadcrumb navigation)
 ├── model.rs       # boundary-parsed types (SecretEntry, KvData, TokenInfo, HealthInfo)
 ├── path.rs        # SecretPath newtype (trailing-slash semantics)
-├── ui/            # pure view renderers: header, engines, secrets, secret_data, modal
+├── profiles.rs    # named connection profiles (token file/command) from config.toml
+├── fuzzy.rs       # fuzzy matching (command palette, profile picker, list filter)
+├── ui/            # pure view renderers: header, engines, secrets, secret_data, modal,
+│                  #   prompt, palette, contexts
 ├── theme.rs       # semantic color palette
 ├── clipboard.rs   # copypasta + pbcopy-wl-copy fallback
 └── event.rs       # Command enum

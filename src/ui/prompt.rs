@@ -1,5 +1,4 @@
-//! Single-field input prompt (new secret name / new key name), rendered as a
-//! centered popup over the body area.
+//! Single-field input prompt (new secret/key/policy), rendered as a centered popup.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -9,21 +8,39 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::theme::Theme;
 
-/// What the prompt is collecting (drives its title and hint text).
+/// What the prompt is collecting (drives title and labels).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
     /// A name for a new secret inside the current directory.
     NewSecret,
     /// A name for a new key inside the current secret.
     NewKey,
-    /// Confirmation before deleting a secret (`input` holds its name).
+    /// Confirmation before deleting a secret (`input` holds the name).
     DeleteSecret,
     /// Confirmation before permanently destroying one secret version.
     DestroyVersion,
+    /// A `:` command-palette entry.
+    Command,
+    /// Policies for a child token (comma/space separated).
+    ChildTokenPolicies,
+    /// TTL for a child token (e.g. `1h`; blank for the server default).
+    ChildTokenTtl,
+    /// Use limit for a child token (blank for unlimited).
+    ChildTokenUses,
+    /// JSON payload to response-wrap.
+    WrapPayload,
+    /// Wrap TTL (blank for the server default).
+    WrapTtl,
+    /// A wrapping token to unwrap (rendered masked).
+    UnwrapToken,
+    /// A name for a new ACL policy.
+    NewPolicy,
+    /// Confirmation before saving ACL policy changes.
+    SavePolicy,
 }
 
 impl PromptKind {
-    /// The popup title for this prompt.
+    /// Popup title for this prompt.
     #[must_use]
     pub const fn title(self) -> &'static str {
         match self {
@@ -31,17 +48,34 @@ impl PromptKind {
             Self::NewKey => "New Key",
             Self::DeleteSecret => "Delete Secret",
             Self::DestroyVersion => "Destroy Version",
+            Self::Command => "Command",
+            Self::ChildTokenPolicies => "Child Token: Policies",
+            Self::ChildTokenTtl => "Child Token: TTL",
+            Self::ChildTokenUses => "Child Token: Use Limit",
+            Self::WrapPayload => "Wrap Payload",
+            Self::WrapTtl => "Wrap TTL",
+            Self::UnwrapToken => "Unwrap Token",
+            Self::NewPolicy => "New Policy",
+            Self::SavePolicy => "Save Policy",
         }
     }
 
-    /// The field label for this prompt.
+    /// Field label for this prompt.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::NewSecret => "Secret name",
             Self::NewKey => "Key name",
-            Self::DeleteSecret => "Confirm",
+            Self::DeleteSecret | Self::SavePolicy => "Confirm",
             Self::DestroyVersion => "Type version",
+            Self::Command => "Command",
+            Self::ChildTokenPolicies => "Policies (comma separated)",
+            Self::ChildTokenTtl => "TTL (e.g. 1h)",
+            Self::ChildTokenUses => "Use limit",
+            Self::WrapPayload => "Payload (JSON)",
+            Self::WrapTtl => "TTL (e.g. 5m)",
+            Self::UnwrapToken => "Wrapping token",
+            Self::NewPolicy => "Policy name",
         }
     }
 
@@ -50,24 +84,45 @@ impl PromptKind {
     pub const fn accepts_input(self) -> bool {
         !matches!(self, Self::DeleteSecret)
     }
+
+    /// True when the prompt refuses an empty submission.
+    ///
+    /// The TTL/use-limit/policy fields may be left blank (server defaults).
+    #[must_use]
+    pub const fn requires_input(self) -> bool {
+        !matches!(
+            self,
+            Self::ChildTokenPolicies | Self::ChildTokenTtl | Self::ChildTokenUses | Self::WrapTtl
+        )
+    }
+
+    /// True when the typed input is sensitive and must render masked.
+    #[must_use]
+    pub const fn masked_input(self) -> bool {
+        matches!(self, Self::UnwrapToken)
+    }
 }
 
-/// Data rendered by the input prompt.
+/// Data rendered by the prompt popup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptModel {
-    /// What is being collected.
+    /// Prompt kind.
     pub kind: PromptKind,
     /// Current input text.
     pub input: String,
-    /// Optional error shown under the field (e.g. permission denied).
+    /// Optional error shown in the message row.
     pub error: Option<String>,
+<<<<<<< HEAD
     /// Optional exact confirmation text expected from the user.
     pub expected: Option<String>,
+=======
+    /// Optional detail shown in the message row.
+    pub detail: Option<String>,
+>>>>>>> origin/main
 }
 
-/// Draws the centered input prompt over `area`.
+/// Draws the centered prompt over `area`.
 pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme: &Theme) {
-    // Size the popup to roughly half the area, clamped to something usable.
     let width = (area.width / 2).clamp(24, 80).min(area.width);
     let height = 7.min(area.height);
     let popup = centered(area, width, height);
@@ -90,10 +145,11 @@ pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme
         return;
     };
 
-    let field = if model.kind == PromptKind::DeleteSecret {
-        Line::from(Span::styled(
+    let field = match model.kind {
+        PromptKind::DeleteSecret => Line::from(Span::styled(
             format!("delete secret '{}'?", model.input),
             Style::default().fg(theme.status_warn),
+<<<<<<< HEAD
         ))
     } else if model.kind == PromptKind::DestroyVersion {
         let expected = model.expected.as_deref().unwrap_or_default();
@@ -118,10 +174,43 @@ pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme
                 Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
             ),
         ])
+=======
+        )),
+        PromptKind::SavePolicy => Line::from(Span::styled(
+            format!("save policy '{}' ?", model.input),
+            Style::default().fg(theme.status_warn),
+        )),
+        PromptKind::NewSecret
+        | PromptKind::NewKey
+        | PromptKind::NewPolicy
+        | PromptKind::Command
+        | PromptKind::ChildTokenPolicies
+        | PromptKind::ChildTokenTtl
+        | PromptKind::ChildTokenUses
+        | PromptKind::WrapPayload
+        | PromptKind::WrapTtl
+        | PromptKind::UnwrapToken => {
+            let shown = if model.kind.masked_input() {
+                "*".repeat(model.input.chars().count())
+            } else {
+                model.input.clone()
+            };
+            Line::from(vec![
+                Span::styled(
+                    format!("{}: ", model.kind.label()),
+                    Style::default().fg(theme.leaf_fg),
+                ),
+                Span::styled(
+                    shown,
+                    Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
+                ),
+            ])
+        }
+>>>>>>> origin/main
     };
     frame.render_widget(Paragraph::new(field), *field_row);
 
-    let message = model.error.as_ref().map_or_else(
+    let base_message = model.error.as_ref().map_or_else(
         || {
             if model.kind == PromptKind::DestroyVersion {
                 let expected = model.expected.as_deref().unwrap_or_default();
@@ -143,6 +232,16 @@ pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme
             ))
         },
     );
+    let message = model.detail.as_ref().map_or(base_message, |detail| {
+        Line::from(vec![
+            Span::styled(detail.as_str(), Style::default().fg(theme.masked_fg)),
+            Span::raw("  │  "),
+            Span::styled(
+                "enter confirm │ esc cancel",
+                Style::default().fg(theme.masked_fg),
+            ),
+        ])
+    });
     frame.render_widget(Paragraph::new(message), *message_row);
 }
 
@@ -172,7 +271,11 @@ mod tests {
             kind,
             input: input.to_owned(),
             error: error.map(str::to_owned),
+<<<<<<< HEAD
             expected: expected.map(str::to_owned),
+=======
+            detail: None,
+>>>>>>> origin/main
         };
         terminal
             .draw(|frame| {
@@ -229,11 +332,48 @@ mod tests {
     }
 
     #[test]
+<<<<<<< HEAD
     fn prompt_destroy_version_requires_exact_version() {
         let output = render(PromptKind::DestroyVersion, "", None, Some("12"));
 
         assert_snapshot!(output);
         assert!(output.contains("permanently destroy version 12?"));
         assert!(output.contains("type 12 to confirm"));
+=======
+    fn prompt_new_policy_shows_title() {
+        let output = render(PromptKind::NewPolicy, "team", None);
+        assert_snapshot!("prompt_new_policy", output);
+        assert!(output.contains("New Policy"));
+    }
+
+    #[test]
+    fn prompt_save_policy_shows_confirmation_and_detail() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("TestBackend");
+        let model = PromptModel {
+            kind: PromptKind::SavePolicy,
+            input: "team".to_owned(),
+            error: None,
+            detail: Some("10 bytes / 1 lines → 20 bytes / 2 lines".to_owned()),
+        };
+        terminal
+            .draw(|frame| {
+                draw_prompt(frame, frame.area(), &model, &Theme::default());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(
+                    buffer
+                        .cell((x, y))
+                        .map_or("", ratatui::buffer::Cell::symbol),
+                );
+            }
+            out.push('\n');
+        }
+        assert_snapshot!("prompt_save_policy", out);
+>>>>>>> origin/main
     }
 }

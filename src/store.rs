@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use crate::model::{HealthInfo, KvData, KvVersionHistory, SecretEntry, TokenInfo};
+use crate::model::{
+    HealthInfo, KvData, KvVersionHistory, MintedToken, PolicyDocument, PolicyEntry, SecretEntry,
+    TokenInfo, WrappedToken,
+};
 use crate::path::SecretPath;
 
 /// Composite key for a cached listing: mount engine plus relative KV path.
@@ -179,6 +182,73 @@ pub enum Msg {
         /// Source version that was restored.
         source_version: u64,
     },
+    /// The active token was renewed successfully.
+    TokenRenewed {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+    },
+    /// A child token was minted (value shown once; never cached).
+    TokenMinted {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// The minted token details.
+        minted: MintedToken,
+    },
+    /// Data was wrapped into a wrapping token (shown once; never cached).
+    DataWrapped {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// The wrapping token details.
+        wrapped: WrappedToken,
+    },
+    /// A wrapping token was unwrapped into a pretty-printed payload.
+    DataUnwrapped {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Pretty-printed JSON payload.
+        payload: String,
+    },
+    /// Token-management capabilities for the active token were loaded (action gating).
+    TokenCapabilities {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Whether the token may create child tokens (`auth/token/create`).
+        can_create: bool,
+        /// Whether the token may wrap data (`sys/wrapping/wrap`).
+        can_wrap: bool,
+    },
+    /// ACL policy list was loaded.
+    PoliciesLoaded {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Loaded ACL policy entries.
+        entries: Vec<PolicyEntry>,
+    },
+    /// One ACL policy document was loaded.
+    PolicyLoaded {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Policy name key.
+        name: String,
+        /// Loaded policy document.
+        document: PolicyDocument,
+    },
+    /// An ACL policy was written successfully.
+    PolicyWritten {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Written policy name.
+        name: String,
+    },
+    /// ACL policy write capability for a policy name.
+    PolicyCapabilities {
+        /// Generation stamped when the background task was spawned.
+        generation: u64,
+        /// Policy name that was probed.
+        name: String,
+        /// Whether this policy is writable.
+        writable: bool,
+    },
 }
 
 /// In-memory cache the renderer folds messages into.
@@ -186,7 +256,10 @@ pub enum Msg {
 pub struct Store {
     /// Cached secret engines.
     pub engines: Vec<SecretEntry>,
+    /// Cached ACL policy list.
+    pub policies: Vec<PolicyEntry>,
     secrets: HashMap<CacheKey, Vec<SecretEntry>>,
+    policy_documents: HashMap<String, PolicyDocument>,
     generation: u64,
 }
 
@@ -219,12 +292,21 @@ impl Store {
                 self.secrets.insert(key, entries);
                 true
             }
+            Msg::PoliciesLoaded { entries, .. } => {
+                self.policies = entries;
+                true
+            }
+            Msg::PolicyLoaded { name, document, .. } => {
+                self.policy_documents.insert(name, document);
+                true
+            }
             Msg::SecretLoaded { .. }
             | Msg::HealthLoaded { .. }
             | Msg::TokenLoaded { .. }
             | Msg::SecretWritten { .. }
             | Msg::Capabilities { .. }
             | Msg::SecretCreated { .. }
+<<<<<<< HEAD
             | Msg::SecretMetadataDeleted { .. }
             | Msg::VersionsLoaded { .. }
             | Msg::SecretVersionLoaded { .. }
@@ -232,6 +314,16 @@ impl Store {
             | Msg::SecretVersionUndeleted { .. }
             | Msg::SecretVersionDestroyed { .. }
             | Msg::SecretVersionRestored { .. } => true,
+=======
+            | Msg::SecretDeleted { .. }
+            | Msg::TokenRenewed { .. }
+            | Msg::TokenMinted { .. }
+            | Msg::DataWrapped { .. }
+            | Msg::DataUnwrapped { .. }
+            | Msg::TokenCapabilities { .. }
+            | Msg::PolicyWritten { .. }
+            | Msg::PolicyCapabilities { .. } => true,
+>>>>>>> origin/main
             Msg::HardRefreshed { key, .. } => {
                 self.secrets.remove(&key);
                 true
@@ -250,16 +342,35 @@ impl Store {
         self.generation
     }
 
+    /// Clears cached engines and listings without resetting the generation, so
+    /// results still in flight from a previous connection are dropped as stale.
+    pub fn clear_cached_data_preserving_generation(&mut self) {
+        self.engines.clear();
+        self.secrets.clear();
+    }
+
     /// Returns the cached secret engines.
     #[must_use]
     pub fn engines(&self) -> &[SecretEntry] {
         &self.engines
     }
 
+    /// Returns the cached ACL policy list.
+    #[must_use]
+    pub fn policies(&self) -> &[PolicyEntry] {
+        &self.policies
+    }
+
     /// Returns a cached child listing by key.
     #[must_use]
     pub fn secrets(&self, key: &CacheKey) -> Option<&[SecretEntry]> {
         self.secrets.get(key).map(Vec::as_slice)
+    }
+
+    /// Returns a cached ACL policy document by name.
+    #[must_use]
+    pub fn policy_document(&self, name: &str) -> Option<&PolicyDocument> {
+        self.policy_documents.get(name)
     }
 
     fn evict_not_found(&mut self, key: &CacheKey) {
@@ -288,6 +399,7 @@ impl Msg {
             | Self::SecretWritten { generation, .. }
             | Self::Capabilities { generation, .. }
             | Self::SecretCreated { generation, .. }
+<<<<<<< HEAD
             | Self::SecretMetadataDeleted { generation, .. }
             | Self::VersionsLoaded { generation, .. }
             | Self::SecretVersionLoaded { generation, .. }
@@ -295,6 +407,18 @@ impl Msg {
             | Self::SecretVersionUndeleted { generation, .. }
             | Self::SecretVersionDestroyed { generation, .. }
             | Self::SecretVersionRestored { generation, .. }
+=======
+            | Self::SecretDeleted { generation, .. }
+            | Self::TokenRenewed { generation, .. }
+            | Self::TokenMinted { generation, .. }
+            | Self::DataWrapped { generation, .. }
+            | Self::DataUnwrapped { generation, .. }
+            | Self::TokenCapabilities { generation, .. }
+            | Self::PoliciesLoaded { generation, .. }
+            | Self::PolicyLoaded { generation, .. }
+            | Self::PolicyWritten { generation, .. }
+            | Self::PolicyCapabilities { generation, .. }
+>>>>>>> origin/main
             | Self::HardRefreshed { generation, .. }
             | Self::PathNotFound { generation, .. }
             | Self::Failure { generation, .. } => *generation,
@@ -386,6 +510,32 @@ mod tests {
             store.secrets(&sibling),
             Some([SecretEntry::leaf("two")].as_slice())
         );
+    }
+
+    #[test]
+    fn clear_cached_data_preserving_generation_keeps_generation_and_drops_stale() {
+        let mut store = Store::new();
+        let generation = store.bump_generation();
+        load_secrets(
+            &mut store,
+            generation,
+            key("team/"),
+            vec![SecretEntry::leaf("one")],
+        );
+        assert!(store.apply(Msg::EnginesLoaded {
+            generation,
+            entries: vec![SecretEntry::dir("secret/")],
+        }));
+
+        store.clear_cached_data_preserving_generation();
+
+        assert_eq!(store.engines(), []);
+        assert_eq!(store.secrets(&key("team/")), None);
+        assert_eq!(store.generation(), generation);
+        assert!(!store.apply(Msg::EnginesLoaded {
+            generation: generation - 1,
+            entries: Vec::new(),
+        }));
     }
 
     #[test]
