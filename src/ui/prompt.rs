@@ -112,13 +112,10 @@ pub struct PromptModel {
     pub input: String,
     /// Optional error shown in the message row.
     pub error: Option<String>,
-<<<<<<< HEAD
     /// Optional exact confirmation text expected from the user.
     pub expected: Option<String>,
-=======
     /// Optional detail shown in the message row.
     pub detail: Option<String>,
->>>>>>> origin/main
 }
 
 /// Draws the centered prompt over `area`.
@@ -147,35 +144,22 @@ pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme
 
     let field = match model.kind {
         PromptKind::DeleteSecret => Line::from(Span::styled(
-            format!("delete secret '{}'?", model.input),
+            format!("delete secret '{}' ?", model.input),
             Style::default().fg(theme.status_warn),
-<<<<<<< HEAD
-        ))
-    } else if model.kind == PromptKind::DestroyVersion {
-        let expected = model.expected.as_deref().unwrap_or_default();
-        Line::from(vec![
-            Span::styled(
-                format!("permanently destroy version {expected}? "),
-                Style::default().fg(theme.status_error),
-            ),
-            Span::styled(
-                model.input.as_str(),
-                Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
-            ),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled(
-                format!("{}: ", model.kind.label()),
-                Style::default().fg(theme.leaf_fg),
-            ),
-            Span::styled(
-                model.input.as_str(),
-                Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
-            ),
-        ])
-=======
         )),
+        PromptKind::DestroyVersion => {
+            let expected = model.expected.as_deref().unwrap_or_default();
+            Line::from(vec![
+                Span::styled(
+                    format!("permanently destroy version {expected}? "),
+                    Style::default().fg(theme.status_error),
+                ),
+                Span::styled(
+                    model.input.as_str(),
+                    Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
+                ),
+            ])
+        }
         PromptKind::SavePolicy => Line::from(Span::styled(
             format!("save policy '{}' ?", model.input),
             Style::default().fg(theme.status_warn),
@@ -206,7 +190,6 @@ pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme
                 ),
             ])
         }
->>>>>>> origin/main
     };
     frame.render_widget(Paragraph::new(field), *field_row);
 
@@ -271,11 +254,8 @@ mod tests {
             kind,
             input: input.to_owned(),
             error: error.map(str::to_owned),
-<<<<<<< HEAD
             expected: expected.map(str::to_owned),
-=======
             detail: None,
->>>>>>> origin/main
         };
         terminal
             .draw(|frame| {
@@ -332,16 +312,17 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
     fn prompt_destroy_version_requires_exact_version() {
         let output = render(PromptKind::DestroyVersion, "", None, Some("12"));
 
         assert_snapshot!(output);
         assert!(output.contains("permanently destroy version 12?"));
         assert!(output.contains("type 12 to confirm"));
-=======
+    }
+
+    #[test]
     fn prompt_new_policy_shows_title() {
-        let output = render(PromptKind::NewPolicy, "team", None);
+        let output = render(PromptKind::NewPolicy, "team", None, None);
         assert_snapshot!("prompt_new_policy", output);
         assert!(output.contains("New Policy"));
     }
@@ -354,6 +335,7 @@ mod tests {
             kind: PromptKind::SavePolicy,
             input: "team".to_owned(),
             error: None,
+            expected: None,
             detail: Some("10 bytes / 1 lines → 20 bytes / 2 lines".to_owned()),
         };
         terminal
@@ -374,6 +356,5 @@ mod tests {
             out.push('\n');
         }
         assert_snapshot!("prompt_save_policy", out);
->>>>>>> origin/main
     }
 }

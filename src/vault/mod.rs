@@ -10,14 +10,10 @@ use std::future::Future;
 use serde_json::Value;
 
 pub use self::client::VaultClient;
-<<<<<<< HEAD
-use crate::model::{HealthInfo, KvData, KvVersionHistory, SecretEntry, TokenInfo};
-=======
 use crate::model::{
-    HealthInfo, KvData, MintedToken, PolicyDocument, PolicyEntry, SecretEntry, TokenCreateRequest,
-    TokenInfo, WrappedToken,
+    HealthInfo, KvData, KvVersionHistory, MintedToken, PolicyDocument, PolicyEntry, SecretEntry,
+    TokenCreateRequest, TokenInfo, WrappedToken,
 };
->>>>>>> origin/main
 use crate::path::SecretPath;
 
 pub mod client;

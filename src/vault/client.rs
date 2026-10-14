@@ -13,12 +13,8 @@ use vaultrs::error::ClientError;
 use super::{VaultApi, VaultError, encode_acl_policy_name};
 use crate::constants::NA_VALUE;
 use crate::model::{
-<<<<<<< HEAD
-    HealthInfo, KvData, KvMetadata, KvVersionHistory, SecretEntry, TokenInfo, VersionMeta,
-=======
-    HealthInfo, KvData, KvMetadata, MintedToken, PolicyDocument, PolicyEntry, SecretEntry,
-    TokenCreateRequest, TokenInfo, WrappedToken,
->>>>>>> origin/main
+    HealthInfo, KvData, KvMetadata, KvVersionHistory, MintedToken, PolicyDocument, PolicyEntry,
+    SecretEntry, TokenCreateRequest, TokenInfo, VersionMeta, WrappedToken,
 };
 use crate::path::SecretPath;
 

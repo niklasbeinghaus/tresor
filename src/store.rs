@@ -306,16 +306,13 @@ impl Store {
             | Msg::SecretWritten { .. }
             | Msg::Capabilities { .. }
             | Msg::SecretCreated { .. }
-<<<<<<< HEAD
             | Msg::SecretMetadataDeleted { .. }
             | Msg::VersionsLoaded { .. }
             | Msg::SecretVersionLoaded { .. }
             | Msg::SecretVersionDeleted { .. }
             | Msg::SecretVersionUndeleted { .. }
             | Msg::SecretVersionDestroyed { .. }
-            | Msg::SecretVersionRestored { .. } => true,
-=======
-            | Msg::SecretDeleted { .. }
+            | Msg::SecretVersionRestored { .. }
             | Msg::TokenRenewed { .. }
             | Msg::TokenMinted { .. }
             | Msg::DataWrapped { .. }
@@ -323,7 +320,6 @@ impl Store {
             | Msg::TokenCapabilities { .. }
             | Msg::PolicyWritten { .. }
             | Msg::PolicyCapabilities { .. } => true,
->>>>>>> origin/main
             Msg::HardRefreshed { key, .. } => {
                 self.secrets.remove(&key);
                 true
@@ -399,7 +395,6 @@ impl Msg {
             | Self::SecretWritten { generation, .. }
             | Self::Capabilities { generation, .. }
             | Self::SecretCreated { generation, .. }
-<<<<<<< HEAD
             | Self::SecretMetadataDeleted { generation, .. }
             | Self::VersionsLoaded { generation, .. }
             | Self::SecretVersionLoaded { generation, .. }
@@ -407,8 +402,6 @@ impl Msg {
             | Self::SecretVersionUndeleted { generation, .. }
             | Self::SecretVersionDestroyed { generation, .. }
             | Self::SecretVersionRestored { generation, .. }
-=======
-            | Self::SecretDeleted { generation, .. }
             | Self::TokenRenewed { generation, .. }
             | Self::TokenMinted { generation, .. }
             | Self::DataWrapped { generation, .. }
@@ -418,7 +411,6 @@ impl Msg {
             | Self::PolicyLoaded { generation, .. }
             | Self::PolicyWritten { generation, .. }
             | Self::PolicyCapabilities { generation, .. }
->>>>>>> origin/main
             | Self::HardRefreshed { generation, .. }
             | Self::PathNotFound { generation, .. }
             | Self::Failure { generation, .. } => *generation,
