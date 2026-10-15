@@ -13,8 +13,8 @@ use vaultrs::error::ClientError;
 use super::{VaultApi, VaultError, encode_acl_policy_name};
 use crate::constants::NA_VALUE;
 use crate::model::{
-    HealthInfo, KvData, KvMetadata, MintedToken, PolicyDocument, PolicyEntry, SecretEntry,
-    TokenCreateRequest, TokenInfo, WrappedToken,
+    HealthInfo, KvData, KvMetadata, KvVersionHistory, MintedToken, PolicyDocument, PolicyEntry,
+    SecretEntry, TokenCreateRequest, TokenInfo, VersionMeta, WrappedToken,
 };
 use crate::path::SecretPath;
 
@@ -98,8 +98,22 @@ impl VaultClient {
         error_path: &str,
         body: &Value,
     ) -> Result<Value, VaultError> {
+        Self::raw_json_body(http, url, reqwest::Method::POST, token, error_path, body).await
+    }
+
+    /// Sends a request with a JSON body and returns the JSON envelope.
+    async fn raw_json_body(
+        http: reqwest::Client,
+        url: &str,
+        method: reqwest::Method,
+        token: &str,
+        error_path: &str,
+        body: &Value,
+    ) -> Result<Value, VaultError> {
         Self::raw_request(
-            http.post(url).header("X-Vault-Token", token).json(body),
+            http.request(method, url)
+                .header("X-Vault-Token", token)
+                .json(body),
             error_path,
         )
         .await
@@ -224,6 +238,89 @@ impl VaultApi for VaultClient {
         let token = self.token.expose_secret().to_owned();
         async move {
             let body = Self::raw_json(http, &url, reqwest::Method::GET, &token, &url).await?;
+            kv_data_from_value(body.get("data").unwrap_or(&Value::Null))
+        }
+    }
+
+    fn read_kv_metadata(
+        &self,
+        mount: &SecretPath,
+        path: &SecretPath,
+    ) -> impl std::future::Future<Output = Result<KvVersionHistory, VaultError>> + Send {
+        let url = format!(
+            "{}/v1/{}/metadata/{}",
+            self.addr,
+            mount.as_str(),
+            path.as_str()
+        );
+        let api_path = format!("{}/metadata/{}", mount.as_str(), path.as_str());
+        let http = self.http.clone();
+        let token = self.token.expose_secret().to_owned();
+        async move {
+            let body = Self::raw_json(http, &url, reqwest::Method::GET, &token, &api_path).await?;
+            let data = body.get("data").and_then(Value::as_object).ok_or_else(|| {
+                VaultError::Parse("metadata response had no object data field".to_owned())
+            })?;
+            let current_version = data
+                .get("current_version")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let mut versions = data.get("versions").and_then(Value::as_object).map_or_else(
+                Vec::new,
+                |version_map| {
+                    version_map
+                        .iter()
+                        .filter_map(|(version_key, metadata)| {
+                            version_key.parse::<u64>().ok().map(|version| {
+                                let created_time = metadata
+                                    .get("created_time")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                let deletion_time = deletion_time_from_field(
+                                    metadata.get("deletion_time").unwrap_or(&Value::Null),
+                                );
+                                let destroyed = metadata
+                                    .get("destroyed")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false);
+                                VersionMeta {
+                                    version,
+                                    created_time,
+                                    deletion_time,
+                                    destroyed,
+                                    is_current: version == current_version,
+                                }
+                            })
+                        })
+                        .collect()
+                },
+            );
+            versions.sort_by_key(|left| std::cmp::Reverse(left.version));
+            Ok(KvVersionHistory {
+                current_version,
+                versions,
+            })
+        }
+    }
+
+    fn read_kv_version(
+        &self,
+        mount: &SecretPath,
+        path: &SecretPath,
+        version: u64,
+    ) -> impl std::future::Future<Output = Result<KvData, VaultError>> + Send {
+        let url = format!(
+            "{}/v1/{}/data/{}?version={version}",
+            self.addr,
+            mount.as_str(),
+            path.as_str()
+        );
+        let api_path = format!("{}/data/{}", mount.as_str(), path.as_str());
+        let http = self.http.clone();
+        let token = self.token.expose_secret().to_owned();
+        async move {
+            let body = Self::raw_json(http, &url, reqwest::Method::GET, &token, &api_path).await?;
             kv_data_from_value(body.get("data").unwrap_or(&Value::Null))
         }
     }
@@ -353,6 +450,74 @@ impl VaultApi for VaultClient {
         }
     }
 
+    fn delete_kv_secret_version(
+        &self,
+        mount: &SecretPath,
+        path: &SecretPath,
+        version: u64,
+    ) -> impl std::future::Future<Output = Result<(), VaultError>> + Send {
+        let url = format!(
+            "{}/v1/{}/delete/{}",
+            self.addr,
+            mount.as_str(),
+            path.as_str()
+        );
+        let api_path = format!("{}/delete/{}", mount.as_str(), path.as_str());
+        let token = self.token.expose_secret().to_owned();
+        let http = self.http.clone();
+        async move {
+            let body = serde_json::json!({"versions": [version]});
+            Self::raw_json_body(http, &url, reqwest::Method::POST, &token, &api_path, &body)
+                .await
+                .map(|_| ())
+        }
+    }
+
+    fn undelete_kv_secret_version(
+        &self,
+        mount: &SecretPath,
+        path: &SecretPath,
+        version: u64,
+    ) -> impl std::future::Future<Output = Result<(), VaultError>> + Send {
+        let url = format!(
+            "{}/v1/{}/undelete/{}",
+            self.addr,
+            mount.as_str(),
+            path.as_str()
+        );
+        let api_path = format!("{}/undelete/{}", mount.as_str(), path.as_str());
+        let token = self.token.expose_secret().to_owned();
+        let http = self.http.clone();
+        async move {
+            let body = serde_json::json!({"versions": [version]});
+            Self::raw_json_body(http, &url, reqwest::Method::POST, &token, &api_path, &body)
+                .await
+                .map(|_| ())
+        }
+    }
+
+    fn destroy_kv_secret_version(
+        &self,
+        mount: &SecretPath,
+        path: &SecretPath,
+        version: u64,
+    ) -> impl std::future::Future<Output = Result<(), VaultError>> + Send {
+        let url = format!(
+            "{}/v1/{}/destroy/{}",
+            self.addr,
+            mount.as_str(),
+            path.as_str()
+        );
+        let api_path = format!("{}/destroy/{}", mount.as_str(), path.as_str());
+        let token = self.token.expose_secret().to_owned();
+        let http = self.http.clone();
+        async move {
+            let body = serde_json::json!({"versions": [version]});
+            Self::raw_json_body(http, &url, reqwest::Method::PUT, &token, &api_path, &body)
+                .await
+                .map(|_| ())
+        }
+    }
     fn renew_token_self(&self) -> impl std::future::Future<Output = Result<(), VaultError>> + Send {
         let url = format!("{}/v1/auth/token/renew-self", self.addr);
         let token = self.token.expose_secret().to_owned();
@@ -652,8 +817,18 @@ fn kv_data_from_value(data_block: &Value) -> Result<KvData, VaultError> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
+            deletion_time: deletion_time_from_field(
+                metadata.get("deletion_time").unwrap_or(&Value::Null),
+            ),
         },
     })
+}
+
+fn deletion_time_from_field(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|timestamp| !timestamp.is_empty())
+        .map(str::to_owned)
 }
 
 fn display_value(value: &Value) -> String {

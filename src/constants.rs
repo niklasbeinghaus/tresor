@@ -20,6 +20,16 @@ pub mod keys {
     pub const EDIT: char = 'e';
     /// `<c>` — copy the selected secret value to the clipboard.
     pub const COPY: char = 'c';
+    /// `<v>` — open the selected secret's version history.
+    pub const VERSIONS: char = 'v';
+    /// `<D>` — metadata delete the selected secret from listings.
+    pub const METADATA_DELETE: char = 'D';
+    /// `<r>` — restore a selected version as latest.
+    pub const RESTORE: char = 'r';
+    /// `<u>` — undelete a selected soft-deleted version.
+    pub const UNDELETE: char = 'u';
+    /// `<X>` — destroy a selected version permanently.
+    pub const DESTROY: char = 'X';
     /// `:` — open the command line.
     pub const COMMAND: char = ':';
 }
@@ -36,6 +46,8 @@ pub mod pages {
     pub const POLICIES: &str = "policies";
     /// Secret key/value view (reveal/edit/copy/save).
     pub const SECRET_DATA: &str = "secret-data";
+    /// Secret version history view.
+    pub const VERSIONS: &str = "versions";
     /// Token inspector view.
     pub const TOKEN: &str = "token";
 }

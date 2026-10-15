@@ -19,6 +19,8 @@ pub enum Mode {
     Policies,
     /// Secret key/value detail view.
     SecretData,
+    /// Secret version history and version preview view.
+    Versions,
     /// Token inspector (lookup-self, renew-self, child tokens, wrapping).
     Token,
 }
@@ -33,6 +35,7 @@ impl Mode {
             Self::Secrets => pages::SECRETS,
             Self::Policies => pages::POLICIES,
             Self::SecretData => pages::SECRET_DATA,
+            Self::Versions => pages::VERSIONS,
             Self::Token => pages::TOKEN,
         }
     }
@@ -119,6 +122,7 @@ mod tests {
         assert_eq!(Mode::Secrets.page_id(), pages::SECRETS);
         assert_eq!(Mode::Policies.page_id(), pages::POLICIES);
         assert_eq!(Mode::SecretData.page_id(), pages::SECRET_DATA);
+        assert_eq!(Mode::Versions.page_id(), pages::VERSIONS);
         assert_eq!(Mode::Token.page_id(), pages::TOKEN);
     }
 

@@ -78,6 +78,32 @@ pub struct KvMetadata {
     pub destroyed: bool,
     /// `RFC3339` timestamp as returned by Vault (e.g. `2026-10-13T10:00:00Z`).
     pub created_time: String,
+    /// `RFC3339` deletion timestamp; `None` when not soft-deleted.
+    pub deletion_time: Option<String>,
+}
+
+/// One entry in a KV2 secret's version history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionMeta {
+    /// Secret version number.
+    pub version: u64,
+    /// `RFC3339` creation timestamp (empty string when Vault omits it).
+    pub created_time: String,
+    /// `RFC3339` deletion timestamp; `None` when the version is not soft-deleted.
+    pub deletion_time: Option<String>,
+    /// True when the version was destroyed (data permanently gone).
+    pub destroyed: bool,
+    /// True when this is the secret's current (latest) version.
+    pub is_current: bool,
+}
+
+/// Full version history for one KV2 secret path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KvVersionHistory {
+    /// Latest version number (`data.current_version`); 0 when absent.
+    pub current_version: u64,
+    /// All versions, sorted newest-first.
+    pub versions: Vec<VersionMeta>,
 }
 
 /// Token lookup info (from `lookup_self`).

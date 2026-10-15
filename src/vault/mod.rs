@@ -11,8 +11,8 @@ use serde_json::Value;
 
 pub use self::client::VaultClient;
 use crate::model::{
-    HealthInfo, KvData, MintedToken, PolicyDocument, PolicyEntry, SecretEntry, TokenCreateRequest,
-    TokenInfo, WrappedToken,
+    HealthInfo, KvData, KvVersionHistory, MintedToken, PolicyDocument, PolicyEntry, SecretEntry,
+    TokenCreateRequest, TokenInfo, WrappedToken,
 };
 use crate::path::SecretPath;
 
@@ -97,6 +97,21 @@ pub trait VaultApi: Send + Sync {
         path: &SecretPath,
     ) -> impl Future<Output = Result<KvData, VaultError>> + Send;
 
+    /// Reads KV2 metadata and version history for one secret path.
+    fn read_kv_metadata(
+        &self,
+        mount: &SecretPath,
+        path: &SecretPath,
+    ) -> impl Future<Output = Result<KvVersionHistory, VaultError>> + Send;
+
+    /// Reads one specific KV2 secret version.
+    fn read_kv_version(
+        &self,
+        mount: &SecretPath,
+        path: &SecretPath,
+        version: u64,
+    ) -> impl Future<Output = Result<KvData, VaultError>> + Send;
+
     /// Writes string data as a new KV2 secret version.
     fn write_kv_secret(
         &self,
@@ -116,6 +131,30 @@ pub trait VaultApi: Send + Sync {
         &self,
         mount: &SecretPath,
         path: &SecretPath,
+    ) -> impl Future<Output = Result<(), VaultError>> + Send;
+
+    /// Soft-deletes one KV2 secret version.
+    fn delete_kv_secret_version(
+        &self,
+        mount: &SecretPath,
+        path: &SecretPath,
+        version: u64,
+    ) -> impl Future<Output = Result<(), VaultError>> + Send;
+
+    /// Undeletes one previously soft-deleted KV2 secret version.
+    fn undelete_kv_secret_version(
+        &self,
+        mount: &SecretPath,
+        path: &SecretPath,
+        version: u64,
+    ) -> impl Future<Output = Result<(), VaultError>> + Send;
+
+    /// Destroys one KV2 secret version permanently.
+    fn destroy_kv_secret_version(
+        &self,
+        mount: &SecretPath,
+        path: &SecretPath,
+        version: u64,
     ) -> impl Future<Output = Result<(), VaultError>> + Send;
 
     /// Reads the capabilities the active token holds on the given API paths

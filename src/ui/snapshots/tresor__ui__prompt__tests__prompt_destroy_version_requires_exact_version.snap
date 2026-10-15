@@ -1,0 +1,17 @@
+---
+source: src/ui/prompt.rs
+expression: output
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                    ┌Destroy Version───────────────────────┐                    
+                    │permanently destroy version 12?       │                    
+                    │type 12 to confirm · esc cancel       │                    
+                    │                                      │                    
+                    │                                      │                    
+                    │                                      │                    
+                    └──────────────────────────────────────┘

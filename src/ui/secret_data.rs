@@ -55,11 +55,25 @@ pub struct SecretDataModel {
     pub selected: usize,
     /// Current right-pane display mode.
     pub mode: DataMode,
+    /// True when the model must never render an editor.
+    pub read_only: bool,
 }
 
 /// Draws the secret data list and optional preview/editor pane.
 pub fn draw_secret_data(frame: &mut Frame<'_>, area: Rect, model: &SecretDataModel, theme: &Theme) {
-    match &model.mode {
+    let mode = if model.read_only {
+        match &model.mode {
+            DataMode::Preview { key, value } => DataMode::Preview {
+                key: key.clone(),
+                value: value.clone(),
+            },
+            DataMode::ListOnly | DataMode::Edit { .. } => DataMode::ListOnly,
+        }
+    } else {
+        model.mode.clone()
+    };
+
+    match mode {
         DataMode::ListOnly => draw_key_list(frame, area, model, theme),
         DataMode::Preview { key, value } => {
             let panes = split_with_details(area);
@@ -67,7 +81,7 @@ pub fn draw_secret_data(frame: &mut Frame<'_>, area: Rect, model: &SecretDataMod
                 return;
             };
             draw_key_list(frame, *left, model, theme);
-            draw_preview(frame, *right, key, value, theme);
+            draw_preview(frame, *right, &key, &value, theme);
         }
         DataMode::Edit { key, text } => {
             let panes = split_with_details(area);
@@ -75,7 +89,7 @@ pub fn draw_secret_data(frame: &mut Frame<'_>, area: Rect, model: &SecretDataMod
                 return;
             };
             draw_key_list(frame, *left, model, theme);
-            draw_editor(frame, *right, key, text, theme);
+            draw_editor(frame, *right, &key, &text, theme);
         }
     }
 }
@@ -190,6 +204,7 @@ mod tests {
             ],
             selected: 1,
             mode,
+            read_only: false,
         }
     }
 
@@ -268,5 +283,24 @@ mod tests {
             .map(ratatui::buffer::Cell::style)
             .expect("selected row cell");
         assert_eq!(style.bg, Some(theme.selected_bg));
+    }
+
+    #[test]
+    fn draw_secret_data_read_only_version_preview() {
+        let model = SecretDataModel {
+            mode: DataMode::Edit {
+                key: "password".to_owned(),
+                text: "must-not-render-editor".to_owned(),
+            },
+            read_only: true,
+            ..fixture(DataMode::ListOnly)
+        };
+        let theme = Theme::default();
+
+        let actual = render(120, 30, |frame| {
+            draw_secret_data(frame, frame.area(), &model, &theme);
+        });
+
+        insta::assert_snapshot!(actual);
     }
 }

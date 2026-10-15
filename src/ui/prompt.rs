@@ -17,6 +17,8 @@ pub enum PromptKind {
     NewKey,
     /// Confirmation before deleting a secret (`input` holds the name).
     DeleteSecret,
+    /// Confirmation before permanently destroying one secret version.
+    DestroyVersion,
     /// A `:` command-palette entry.
     Command,
     /// Policies for a child token (comma/space separated).
@@ -45,6 +47,7 @@ impl PromptKind {
             Self::NewSecret => "New Secret",
             Self::NewKey => "New Key",
             Self::DeleteSecret => "Delete Secret",
+            Self::DestroyVersion => "Destroy Version",
             Self::Command => "Command",
             Self::ChildTokenPolicies => "Child Token: Policies",
             Self::ChildTokenTtl => "Child Token: TTL",
@@ -64,6 +67,7 @@ impl PromptKind {
             Self::NewSecret => "Secret name",
             Self::NewKey => "Key name",
             Self::DeleteSecret | Self::SavePolicy => "Confirm",
+            Self::DestroyVersion => "Type version",
             Self::Command => "Command",
             Self::ChildTokenPolicies => "Policies (comma separated)",
             Self::ChildTokenTtl => "TTL (e.g. 1h)",
@@ -75,6 +79,11 @@ impl PromptKind {
         }
     }
 
+    /// Returns whether this prompt accepts typed input.
+    #[must_use]
+    pub const fn accepts_input(self) -> bool {
+        !matches!(self, Self::DeleteSecret)
+    }
     /// True when the prompt refuses an empty submission.
     ///
     /// The TTL/use-limit/policy fields may be left blank (server defaults).
@@ -102,6 +111,8 @@ pub struct PromptModel {
     pub input: String,
     /// Optional error shown in the message row.
     pub error: Option<String>,
+    /// Optional exact confirmation text expected from the user.
+    pub expected: Option<String>,
     /// Optional detail shown in the message row.
     pub detail: Option<String>,
 }
@@ -130,7 +141,47 @@ pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme
         return;
     };
 
-    let field = match model.kind {
+    let field = field_line(model, theme);
+    frame.render_widget(Paragraph::new(field), *field_row);
+
+    let base_message = model.error.as_ref().map_or_else(
+        || {
+            if model.kind == PromptKind::DestroyVersion {
+                let expected = model.expected.as_deref().unwrap_or_default();
+                Line::from(Span::styled(
+                    format!("type {expected} to confirm · esc cancel"),
+                    Style::default().fg(theme.masked_fg),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    "enter confirm │ esc cancel",
+                    Style::default().fg(theme.masked_fg),
+                ))
+            }
+        },
+        |error| {
+            Line::from(Span::styled(
+                error.as_str(),
+                Style::default().fg(theme.status_error),
+            ))
+        },
+    );
+    let message = model.detail.as_ref().map_or(base_message, |detail| {
+        Line::from(vec![
+            Span::styled(detail.as_str(), Style::default().fg(theme.masked_fg)),
+            Span::raw("  │  "),
+            Span::styled(
+                "enter confirm │ esc cancel",
+                Style::default().fg(theme.masked_fg),
+            ),
+        ])
+    });
+    frame.render_widget(Paragraph::new(message), *message_row);
+}
+
+/// Builds the prompt's input/confirmation row for the active prompt kind.
+fn field_line(model: &PromptModel, theme: &Theme) -> Line<'static> {
+    match model.kind {
         PromptKind::DeleteSecret => Line::from(Span::styled(
             format!("delete secret '{}'?", model.input),
             Style::default().fg(theme.status_warn),
@@ -139,6 +190,19 @@ pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme
             format!("save policy '{}' ?", model.input),
             Style::default().fg(theme.status_warn),
         )),
+        PromptKind::DestroyVersion => {
+            let expected = model.expected.as_deref().unwrap_or_default();
+            Line::from(vec![
+                Span::styled(
+                    format!("permanently destroy version {expected}? "),
+                    Style::default().fg(theme.status_error),
+                ),
+                Span::styled(
+                    model.input.clone(),
+                    Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
+                ),
+            ])
+        }
         PromptKind::NewSecret
         | PromptKind::NewKey
         | PromptKind::NewPolicy
@@ -165,34 +229,7 @@ pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme
                 ),
             ])
         }
-    };
-    frame.render_widget(Paragraph::new(field), *field_row);
-
-    let base_message = model.error.as_ref().map_or_else(
-        || {
-            Line::from(Span::styled(
-                "enter confirm │ esc cancel",
-                Style::default().fg(theme.masked_fg),
-            ))
-        },
-        |error| {
-            Line::from(Span::styled(
-                error.as_str(),
-                Style::default().fg(theme.status_error),
-            ))
-        },
-    );
-    let message = model.detail.as_ref().map_or(base_message, |detail| {
-        Line::from(vec![
-            Span::styled(detail.as_str(), Style::default().fg(theme.masked_fg)),
-            Span::raw("  │  "),
-            Span::styled(
-                "enter confirm │ esc cancel",
-                Style::default().fg(theme.masked_fg),
-            ),
-        ])
-    });
-    frame.render_widget(Paragraph::new(message), *message_row);
+    }
 }
 
 const fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -209,13 +246,19 @@ mod tests {
 
     use super::*;
 
-    fn render(kind: PromptKind, input: &str, error: Option<&str>) -> String {
+    fn render(
+        kind: PromptKind,
+        input: &str,
+        error: Option<&str>,
+        expected: Option<&str>,
+    ) -> String {
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("TestBackend");
         let model = PromptModel {
             kind,
             input: input.to_owned(),
             error: error.map(str::to_owned),
+            expected: expected.map(str::to_owned),
             detail: None,
         };
         terminal
@@ -242,7 +285,7 @@ mod tests {
     fn prompt_new_secret_shows_title_label_and_hint() {
         // Given: a new-secret prompt with a typed name.
         // When: it is rendered.
-        let output = render(PromptKind::NewSecret, "team/creds", None);
+        let output = render(PromptKind::NewSecret, "team/creds", None, None);
         // Then: the title, label, input and confirm hint are visible.
         assert_snapshot!("prompt_new_secret", output);
         assert!(output.contains("New Secret"));
@@ -255,7 +298,7 @@ mod tests {
     fn prompt_shows_error_when_present() {
         // Given: a prompt carrying a permission error.
         // When: it is rendered.
-        let output = render(PromptKind::NewKey, "token", Some("permission denied"));
+        let output = render(PromptKind::NewKey, "token", Some("permission denied"), None);
         // Then: the error line replaces the hint.
         assert_snapshot!("prompt_error", output);
         assert!(output.contains("permission denied"));
@@ -265,7 +308,7 @@ mod tests {
     fn prompt_delete_shows_confirmation_question() {
         // Given: a delete confirmation for a named secret.
         // When: it is rendered.
-        let output = render(PromptKind::DeleteSecret, "team/creds", None);
+        let output = render(PromptKind::DeleteSecret, "team/creds", None, None);
         // Then: the question names the secret and the confirm hint is shown.
         assert_snapshot!("prompt_delete_confirm", output);
         assert!(output.contains("delete secret 'team/creds'?"));
@@ -273,8 +316,17 @@ mod tests {
     }
 
     #[test]
+    fn prompt_destroy_version_requires_exact_version() {
+        let output = render(PromptKind::DestroyVersion, "", None, Some("12"));
+
+        assert_snapshot!(output);
+        assert!(output.contains("permanently destroy version 12?"));
+        assert!(output.contains("type 12 to confirm"));
+    }
+
+    #[test]
     fn prompt_new_policy_shows_title() {
-        let output = render(PromptKind::NewPolicy, "team", None);
+        let output = render(PromptKind::NewPolicy, "team", None, None);
         assert_snapshot!("prompt_new_policy", output);
         assert!(output.contains("New Policy"));
     }
@@ -287,6 +339,7 @@ mod tests {
             kind: PromptKind::SavePolicy,
             input: "team".to_owned(),
             error: None,
+            expected: None,
             detail: Some("10 bytes / 1 lines → 20 bytes / 2 lines".to_owned()),
         };
         terminal
