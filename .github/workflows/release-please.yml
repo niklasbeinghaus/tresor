@@ -7,6 +7,11 @@ name: release-please
 # default GITHUB_TOKEN do not trigger further workflows (GitHub anti-recursion), so a
 # tag created by release-please would never start a separate tag-driven workflow.
 # release.yaml still exists for workflow_dispatch re-attachments.
+#
+# Distribution channels release-please cannot maintain (it only bumps the crate
+# version + CHANGELOG) are synced by the `sync-manifests` job below: the Homebrew
+# formula (Formula/tresor.rb, consumed via `brew tap njoerd114/tresor <repo-url>`)
+# plus the scoop manifest and AUR PKGBUILD.
 on:
   push:
     branches: [main]
@@ -26,7 +31,7 @@ jobs:
       tag_name: ${{ steps.release.outputs.tag_name }}
       version: ${{ steps.release.outputs.version }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: release
         with:
           config-file: release-please-config.json
@@ -48,7 +53,7 @@ jobs:
           - { runner: macos-latest, target: aarch64-apple-darwin }
           - { runner: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release.outputs.tag_name }}
       - uses: dtolnay/rust-toolchain@stable
@@ -76,12 +81,12 @@ jobs:
 
       - name: Upload linux binary for packaging
         if: ${{ contains(matrix.target, 'linux') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.target }}
           path: tresor-${{ matrix.target }}
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.release.outputs.tag_name }}
           files: |
@@ -94,11 +99,11 @@ jobs:
     name: packages (deb/rpm/apk)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release.outputs.tag_name }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: linux-*
@@ -127,7 +132,39 @@ jobs:
           done
           ls -l dist
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.release.outputs.tag_name }}
           files: dist/*
+
+  sync-manifests:
+    # `build` must finish first: the hashes are computed from the release assets
+    # it uploads, so a `needs: release`-only job would race the upload.
+    needs: [release, build]
+    if: ${{ needs.release.outputs.release_created == 'true' }}
+    name: sync packaging manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Rewrite Homebrew + scoop + AUR manifests
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          TAG: ${{ needs.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          scripts/sync-packaging.sh "$VERSION" "$TAG"
+
+      - name: Commit to main
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "manifests already current"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(packaging): sync Homebrew + scoop + AUR for ${{ needs.release.outputs.tag_name }} [skip ci]"
+          git push

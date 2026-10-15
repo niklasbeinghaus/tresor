@@ -450,7 +450,6 @@ impl VaultApi for VaultClient {
         }
     }
 
-<<<<<<< HEAD
     fn delete_kv_secret_version(
         &self,
         mount: &SecretPath,
@@ -519,7 +518,6 @@ impl VaultApi for VaultClient {
                 .map(|_| ())
         }
     }
-=======
     fn renew_token_self(&self) -> impl std::future::Future<Output = Result<(), VaultError>> + Send {
         let url = format!("{}/v1/auth/token/renew-self", self.addr);
         let token = self.token.expose_secret().to_owned();
@@ -769,7 +767,6 @@ fn string_list(value: &Value, key: &str) -> Vec<String> {
                 .map(str::to_owned)
                 .collect()
         })
->>>>>>> origin/main
 }
 
 fn secret_entry(key: &str) -> SecretEntry {

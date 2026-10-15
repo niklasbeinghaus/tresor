@@ -44,35 +44,54 @@ impl Page {
         }
     }
 
-    /// The contextual `(key, action)` hint pairs shown on the left.
+    /// The contextual `(key, action)` hint pairs shown on the left. Create/edit
+    /// and delete commands are only listed when the token holds the capability.
     #[must_use]
     pub fn hints(self, permission: Permission) -> Vec<(&'static str, &'static str)> {
         match self {
             Self::Config => vec![("enter", "connect"), ("esc", "quit")],
             Self::Engines => vec![("enter", "open"), ("esc", "quit"), ("j/k", "move")],
-            Self::Token => token_hints(permission),
+            Self::Token => token_hints(permission).to_vec(),
             Self::Secrets => {
                 let mut hints = vec![("enter", "open")];
                 if permission.create || permission.write {
                     hints.push(("n", "new secret"));
                 }
-                if permission.metadata_delete || permission.delete {
+                if permission.delete {
+                    hints.push(("d", "delete"));
+                }
+                if permission.metadata_delete {
                     hints.push(("D", "delete"));
                 }
                 hints.extend([("esc", "back"), ("^r", "refresh"), ("j/k", "move")]);
                 hints
             }
             Self::Policies => {
-                let mut hints = vec![("enter", "preview")];
-                if permission.create || permission.write {
-                    hints.push(("e", "edit"));
-                    hints.push(("n", "new"));
+                if permission.write {
+                    vec![
+                        ("enter", "preview"),
+                        ("e", "edit"),
+                        ("n", "new"),
+                        ("esc", "engines"),
+                        (":", "command"),
+                        ("j/k", "move"),
+                    ]
+                } else {
+                    vec![
+                        ("enter", "preview"),
+                        ("esc", "engines"),
+                        (":", "command"),
+                        ("j/k", "move"),
+                    ]
                 }
-                hints.extend([("esc", "engines"), (":", "command"), ("j/k", "move")]);
-                hints
             }
             Self::SecretData => {
-                let mut hints = vec![("x", "reveal"), ("e", "edit"), ("c", "copy"), ("v", "versions")];
+                let mut hints = vec![
+                    ("x", "reveal"),
+                    ("e", "edit"),
+                    ("c", "copy"),
+                    ("v", "versions"),
+                ];
                 if permission.update || permission.write {
                     hints.push(("a", "add key"));
                 }
@@ -84,7 +103,7 @@ impl Page {
             }
             Self::Versions => {
                 let mut hints = vec![("enter", "preview")];
-                if permission.update || permission.write {
+                if permission.update {
                     hints.push(("r", "restore"));
                 }
                 if permission.undelete {
@@ -101,11 +120,11 @@ impl Page {
 }
 
 /// What the token may do at the current path (drives which hints are shown).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "independent capability flags grouped for command-bar rendering"
+    reason = "capability bits are independent and drive per-action hint visibility"
 )]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Permission {
     /// Token may create secrets at the current path.
     pub create: bool,
@@ -119,9 +138,9 @@ pub struct Permission {
     pub destroy: bool,
     /// Token may undelete secret versions.
     pub undelete: bool,
-    /// Token may create/update secrets here (legacy alias used by some views).
+    /// Token may create/update secrets and policies here.
     pub write: bool,
-    /// Token may delete secrets here (legacy alias used by some views).
+    /// Token may delete secrets here.
     pub delete: bool,
     /// Token may create child tokens.
     pub create_token: bool,
@@ -443,17 +462,10 @@ mod tests {
         // Given/When: the secrets hint sets across permission combinations.
         let read_only = Page::Secrets.hints(Permission::read_only());
         let write_only = Page::Secrets.hints(Permission {
-<<<<<<< HEAD
+            write: true,
             create: true,
             update: true,
-            soft_delete: false,
-            metadata_delete: false,
-            destroy: false,
-            undelete: false,
-=======
-            write: true,
             ..Permission::read_only()
->>>>>>> origin/main
         });
         let full = Page::Secrets.hints(Permission::all());
         let data_readonly = Page::SecretData.hints(Permission::read_only());
@@ -469,7 +481,6 @@ mod tests {
         assert!(data_writable.iter().any(|(_, action)| *action == "add key"));
     }
 
-<<<<<<< HEAD
     #[test]
     fn commands_bar_versions_shows_restore_undelete_destroy_when_permitted() {
         let hints = Page::Versions.hints(Permission::all());
@@ -480,11 +491,13 @@ mod tests {
     }
 
     #[test]
-    fn commands_bar_secrets_shows_upper_d_metadata_delete() {
+    fn commands_bar_secrets_advertises_metadata_delete_keys() {
         let hints = Page::Secrets.hints(Permission::all());
 
+        // Both `D` (version-history branch) and `d` (main) metadata-delete the
+        // selected secret, so both bindings are advertised.
         assert!(hints.contains(&("D", "delete")));
-        assert!(!hints.contains(&("d", "delete")));
+        assert!(hints.contains(&("d", "delete")));
     }
 
     #[test]
@@ -493,7 +506,8 @@ mod tests {
 
         assert!(hints.contains(&("v", "versions")));
         assert!(hints.contains(&("d", "delete latest")));
-=======
+    }
+
     fn render_input(width: u16, height: u16, page: Page, input: CommandBarInput<'_>) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("TestBackend");
@@ -582,6 +596,5 @@ mod tests {
         assert!(!create_only.iter().any(|(_, action)| *action == "wrap"));
         assert!(wrap_only.iter().any(|(_, action)| *action == "wrap"));
         assert!(!wrap_only.iter().any(|(_, action)| *action == "new token"));
->>>>>>> origin/main
     }
 }

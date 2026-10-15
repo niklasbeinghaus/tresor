@@ -84,7 +84,6 @@ impl PromptKind {
     pub const fn accepts_input(self) -> bool {
         !matches!(self, Self::DeleteSecret)
     }
-
     /// True when the prompt refuses an empty submission.
     ///
     /// The TTL/use-limit/policy fields may be left blank (server defaults).
@@ -142,55 +141,7 @@ pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme
         return;
     };
 
-    let field = match model.kind {
-        PromptKind::DeleteSecret => Line::from(Span::styled(
-            format!("delete secret '{}' ?", model.input),
-            Style::default().fg(theme.status_warn),
-        )),
-        PromptKind::DestroyVersion => {
-            let expected = model.expected.as_deref().unwrap_or_default();
-            Line::from(vec![
-                Span::styled(
-                    format!("permanently destroy version {expected}? "),
-                    Style::default().fg(theme.status_error),
-                ),
-                Span::styled(
-                    model.input.as_str(),
-                    Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
-                ),
-            ])
-        }
-        PromptKind::SavePolicy => Line::from(Span::styled(
-            format!("save policy '{}' ?", model.input),
-            Style::default().fg(theme.status_warn),
-        )),
-        PromptKind::NewSecret
-        | PromptKind::NewKey
-        | PromptKind::NewPolicy
-        | PromptKind::Command
-        | PromptKind::ChildTokenPolicies
-        | PromptKind::ChildTokenTtl
-        | PromptKind::ChildTokenUses
-        | PromptKind::WrapPayload
-        | PromptKind::WrapTtl
-        | PromptKind::UnwrapToken => {
-            let shown = if model.kind.masked_input() {
-                "*".repeat(model.input.chars().count())
-            } else {
-                model.input.clone()
-            };
-            Line::from(vec![
-                Span::styled(
-                    format!("{}: ", model.kind.label()),
-                    Style::default().fg(theme.leaf_fg),
-                ),
-                Span::styled(
-                    shown,
-                    Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
-                ),
-            ])
-        }
-    };
+    let field = field_line(model, theme);
     frame.render_widget(Paragraph::new(field), *field_row);
 
     let base_message = model.error.as_ref().map_or_else(
@@ -226,6 +177,59 @@ pub fn draw_prompt(frame: &mut Frame<'_>, area: Rect, model: &PromptModel, theme
         ])
     });
     frame.render_widget(Paragraph::new(message), *message_row);
+}
+
+/// Builds the prompt's input/confirmation row for the active prompt kind.
+fn field_line(model: &PromptModel, theme: &Theme) -> Line<'static> {
+    match model.kind {
+        PromptKind::DeleteSecret => Line::from(Span::styled(
+            format!("delete secret '{}'?", model.input),
+            Style::default().fg(theme.status_warn),
+        )),
+        PromptKind::SavePolicy => Line::from(Span::styled(
+            format!("save policy '{}' ?", model.input),
+            Style::default().fg(theme.status_warn),
+        )),
+        PromptKind::DestroyVersion => {
+            let expected = model.expected.as_deref().unwrap_or_default();
+            Line::from(vec![
+                Span::styled(
+                    format!("permanently destroy version {expected}? "),
+                    Style::default().fg(theme.status_error),
+                ),
+                Span::styled(
+                    model.input.clone(),
+                    Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
+                ),
+            ])
+        }
+        PromptKind::NewSecret
+        | PromptKind::NewKey
+        | PromptKind::NewPolicy
+        | PromptKind::Command
+        | PromptKind::ChildTokenPolicies
+        | PromptKind::ChildTokenTtl
+        | PromptKind::ChildTokenUses
+        | PromptKind::WrapPayload
+        | PromptKind::WrapTtl
+        | PromptKind::UnwrapToken => {
+            let shown = if model.kind.masked_input() {
+                "*".repeat(model.input.chars().count())
+            } else {
+                model.input.clone()
+            };
+            Line::from(vec![
+                Span::styled(
+                    format!("{}: ", model.kind.label()),
+                    Style::default().fg(theme.leaf_fg),
+                ),
+                Span::styled(
+                    shown,
+                    Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
+                ),
+            ])
+        }
+    }
 }
 
 const fn centered(area: Rect, width: u16, height: u16) -> Rect {

@@ -1,6 +1,6 @@
 [package]
 name = "tresor"
-version = "0.3.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.85"
 description = "A k9s-style terminal UI for HashiCorp Vault and OpenBao (Rust rewrite of the Go vaultview)"
@@ -100,7 +100,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
-toml = "0.9"
+toml = "1.1"
 # Fuzzy scoring for the command palette, profile picker and list filter —
 # the same matcher sofka uses (MPL-2.0, already allow-listed in deny.toml).
 nucleo-matcher = "0.3"
@@ -113,7 +113,7 @@ futures = "0.3"
 # External-editor handoff (policy authoring) needs a secure temp file at runtime,
 # and base64 decodes the `base64:`-prefixed ACL policy bodies Vault may return.
 tempfile = "3"
-base64 = "0.22"
+base64 = "0.23"
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml", "filters"] }

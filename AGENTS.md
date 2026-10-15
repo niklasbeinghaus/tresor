@@ -26,6 +26,9 @@ src/
 └── ui/            # PURE renderers: header, engines, secrets, secret_data, token, policies, command_line, modal, prompt (+ insta snapshots)
 tests/vault_integration.rs  # wiremock wire-level tests of VaultClient
 scripts/dev-vault.sh + seed-vault.sh  # local `vault server -dev` + KV2 seed data
+scripts/sync-packaging.sh  # release step: regenerates Formula/tresor.rb + scoop/AUR pins from a tag
+Formula/tresor.rb          # Homebrew formula (generated from packaging/homebrew/tresor.rb.tmpl)
+packaging/                 # scoop manifest + AUR PKGBUILD (pins rewritten by sync-packaging.sh)
 ```
 
 ## WHERE TO LOOK

@@ -344,6 +344,10 @@ pub struct App<V: VaultApi> {
     pub can_destroy: bool,
     /// Token may undelete secret versions at the current context.
     pub can_undelete: bool,
+    /// Token may create/update secrets at the current context (permission gate).
+    pub can_write: bool,
+    /// Token may delete secrets at the current context (permission gate).
+    pub can_delete: bool,
     /// Active input prompt, if any.
     pub prompt: Option<PromptState>,
     /// Active overlay drawn above the current view.
@@ -477,6 +481,8 @@ impl<V: VaultApi + 'static> App<V> {
                 can_metadata_delete: false,
                 can_destroy: false,
                 can_undelete: false,
+                can_write: false,
+                can_delete: false,
                 prompt: None,
                 overlay: None,
                 filter: None,
@@ -553,6 +559,12 @@ impl<V: VaultApi + 'static> App<V> {
         self.secrets_selected = 0;
         self.secrets_path = SecretPath::root();
         self.secrets_engine = SecretPath::root();
+        self.can_create = false;
+        self.can_update = false;
+        self.can_soft_delete = false;
+        self.can_metadata_delete = false;
+        self.can_destroy = false;
+        self.can_undelete = false;
         self.can_write = false;
         self.can_delete = false;
         self.filter = None;
@@ -647,9 +659,7 @@ impl<V: VaultApi + 'static> App<V> {
             AppState::Main(Mode::Secrets) => self.handle_secrets_input(key),
             AppState::Main(Mode::Policies) => self.handle_policies_input(key),
             AppState::Main(Mode::SecretData) => self.handle_secret_data_input(key),
-<<<<<<< HEAD
             AppState::Main(Mode::Versions) => self.handle_versions_input(key),
-=======
             AppState::Main(Mode::Token) => self.handle_token_input(key),
         }
     }
@@ -800,9 +810,9 @@ impl<V: VaultApi + 'static> App<V> {
                 }
             }
             AppState::ConfigInput
-            | AppState::Main(Mode::Config | Mode::Engines | Mode::Policies | Mode::Token) => {
-                FilterScope::Engines
-            }
+            | AppState::Main(
+                Mode::Config | Mode::Engines | Mode::Policies | Mode::Token | Mode::Versions,
+            ) => FilterScope::Engines,
         }
     }
 
@@ -862,8 +872,8 @@ impl<V: VaultApi + 'static> App<V> {
                     ui.selected = 0;
                 }
             }
-            AppState::ConfigInput | AppState::Main(Mode::Config | Mode::Policies | Mode::Token) => {
-            }
+            AppState::ConfigInput
+            | AppState::Main(Mode::Config | Mode::Policies | Mode::Token | Mode::Versions) => {}
         }
     }
 
@@ -924,7 +934,8 @@ impl<V: VaultApi + 'static> App<V> {
                 let total = self.secret_data.as_ref().map_or(0, |ui| ui.data.data.len());
                 (self.filtered_data_keys().len(), total)
             }
-            AppState::ConfigInput | AppState::Main(Mode::Config | Mode::Policies | Mode::Token) => {
+            AppState::ConfigInput
+            | AppState::Main(Mode::Config | Mode::Policies | Mode::Token | Mode::Versions) => {
                 (0, 0)
             }
         }
@@ -962,28 +973,22 @@ impl<V: VaultApi + 'static> App<V> {
             selected,
             filter: state.filter.clone(),
             error: None,
->>>>>>> origin/main
         }
     }
 
     /// Folds a background message into app/store state.
     #[allow(
         clippy::too_many_lines,
-<<<<<<< HEAD
         reason = "single message fold entrypoint keeps app state transitions centralized"
-    )]
-    pub fn apply(&mut self, msg: Msg) {
-        self.pending = false;
-        let is_current = msg.generation() == self.store.generation();
-        if !is_current {
-=======
-        reason = "single fold point for all Msg variants by architecture"
     )]
     pub fn apply(&mut self, msg: Msg) {
         self.pending = false;
         if self.apply_token_event(&msg) {
             let _accepted = self.store.apply(msg);
->>>>>>> origin/main
+            return;
+        }
+        let is_current = msg.generation() == self.store.generation();
+        if !is_current {
             return;
         }
         match &msg {
@@ -1129,21 +1134,23 @@ impl<V: VaultApi + 'static> App<V> {
             sort_entries(entries);
         }
         let accepted = self.store.apply(cache_msg);
-<<<<<<< HEAD
-        if accepted {
-            if let Some((create, update, soft_delete, metadata_delete, destroy, undelete)) =
-                capability_update
-            {
-                self.can_create = create;
-                self.can_update = update;
-                self.can_soft_delete = soft_delete;
-                self.can_metadata_delete = metadata_delete;
-                self.can_destroy = destroy;
-                self.can_undelete = undelete;
-            }
-            if let Some(effect) = policy_effect {
-                self.apply_policy_effect(effect);
-            }
+        if !accepted {
+            return;
+        }
+        if let Some((create, update, soft_delete, metadata_delete, destroy, undelete)) =
+            capability_update
+        {
+            self.can_create = create;
+            self.can_update = update;
+            self.can_soft_delete = soft_delete;
+            self.can_metadata_delete = metadata_delete;
+            self.can_destroy = destroy;
+            self.can_undelete = undelete;
+            self.can_write = create || update;
+            self.can_delete = metadata_delete;
+        }
+        if let Some(effect) = policy_effect {
+            self.apply_policy_effect(effect);
         }
     }
 
@@ -1221,7 +1228,6 @@ impl<V: VaultApi + 'static> App<V> {
                         self.set_status(StatusKind::Error, "no permission to edit policy");
                     }
                 }
->>>>>>> origin/main
             }
         }
     }
@@ -1618,15 +1624,13 @@ impl<V: VaultApi + 'static> App<V> {
                     draw_secret_data(frame, *body_area, &model, &self.theme);
                 }
             }
-<<<<<<< HEAD
             AppState::Main(Mode::Versions) => {
                 if let Some(model) = self.versions_model() {
                     draw_versions(frame, *body_area, &model, &self.theme);
                 }
-=======
+            }
             AppState::Main(Mode::Token) => {
                 draw_token(frame, *body_area, &self.token_model(), &self.theme);
->>>>>>> origin/main
             }
         }
         if let Some(prompt) = &self.prompt {
@@ -1634,11 +1638,8 @@ impl<V: VaultApi + 'static> App<V> {
                 kind: prompt.kind,
                 input: prompt.input.clone(),
                 error: prompt.error.clone(),
-<<<<<<< HEAD
                 expected: prompt.expected.clone(),
-=======
                 detail: prompt.detail.clone(),
->>>>>>> origin/main
             };
             draw_prompt(frame, *body_area, &model, &self.theme);
         }
@@ -1777,8 +1778,8 @@ impl<V: VaultApi + 'static> App<V> {
                 self.open_new_secret_prompt();
                 false
             }
-            KeyCode::Char(keys::METADATA_DELETE) => {
-                self.open_delete_secret_metadata_prompt();
+            KeyCode::Char('d' | keys::METADATA_DELETE) => {
+                self.open_delete_secret_prompt();
                 false
             }
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1850,6 +1851,7 @@ impl<V: VaultApi + 'static> App<V> {
                     input: String::new(),
                     error: None,
                     detail: None,
+                    expected: None,
                 });
                 false
             }
@@ -2071,6 +2073,7 @@ impl<V: VaultApi + 'static> App<V> {
             input: String::new(),
             error: None,
             detail: None,
+            expected: None,
         });
     }
 
@@ -2101,6 +2104,7 @@ impl<V: VaultApi + 'static> App<V> {
             input: String::new(),
             error: None,
             detail: None,
+            expected: None,
         });
     }
 
@@ -2117,6 +2121,7 @@ impl<V: VaultApi + 'static> App<V> {
             input: String::new(),
             error: Some(message),
             detail: None,
+            expected: None,
         });
     }
 
@@ -2324,9 +2329,7 @@ impl<V: VaultApi + 'static> App<V> {
     }
 
     fn open_selected_engine(&mut self) {
-        let engines = self.engines_model().engines;
-        let Some(entry) = engines.get(self.engines_selected) else {
->>>>>>> origin/main
+        let Some(entry) = self.store.engines().get(self.engines_selected).cloned() else {
             return;
         };
         self.secrets_engine = entry.name;
@@ -2675,6 +2678,7 @@ impl<V: VaultApi + 'static> App<V> {
             input: String::new(),
             error: None,
             expected: Some(version.to_string()),
+            detail: None,
         });
     }
 
@@ -3266,11 +3270,8 @@ impl<V: VaultApi + 'static> App<V> {
             kind: PromptKind::NewSecret,
             input: String::new(),
             error: None,
-<<<<<<< HEAD
             expected: None,
-=======
             detail: None,
->>>>>>> origin/main
         });
     }
 
@@ -3281,15 +3282,10 @@ impl<V: VaultApi + 'static> App<V> {
         )
     }
 
-<<<<<<< HEAD
     /// Opens the delete confirmation for the selected leaf entry (directories
     /// are virtual in KV2 — their secrets must be removed individually).
-    fn open_delete_secret_metadata_prompt(&mut self) {
-        if !self.can_metadata_delete {
-=======
     fn open_delete_secret_prompt(&mut self) {
-        if !self.can_delete {
->>>>>>> origin/main
+        if !(self.can_delete || self.can_metadata_delete) {
             self.set_status(StatusKind::Error, "no permission to delete secrets here");
             return;
         }
@@ -3308,11 +3304,8 @@ impl<V: VaultApi + 'static> App<V> {
             kind: PromptKind::DeleteSecret,
             input: entry.name.as_str().to_owned(),
             error: None,
-<<<<<<< HEAD
             expected: None,
-=======
             detail: None,
->>>>>>> origin/main
         });
     }
 
@@ -3350,11 +3343,8 @@ impl<V: VaultApi + 'static> App<V> {
             kind: PromptKind::NewKey,
             input: String::new(),
             error: None,
-<<<<<<< HEAD
             expected: None,
-=======
             detail: None,
->>>>>>> origin/main
         });
     }
 
@@ -3378,29 +3368,19 @@ impl<V: VaultApi + 'static> App<V> {
             KeyCode::Enter => self.submit_prompt(),
             KeyCode::Backspace => {
                 if let Some(prompt) = self.prompt.as_mut() {
-<<<<<<< HEAD
-                    if prompt.kind.accepts_input() {
-                        prompt.input.pop();
-=======
-                    prompt.input.pop();
                     if prompt.kind == PromptKind::Command {
                         if let Some(command_line) = self.command_line.as_mut() {
                             command_line.input.pop();
                         }
->>>>>>> origin/main
+                    }
+                    if prompt.kind.accepts_input() {
+                        prompt.input.pop();
                     }
                 }
             }
             KeyCode::Char(ch) => {
                 if let Some(prompt) = self.prompt.as_mut() {
-<<<<<<< HEAD
                     if prompt.kind.accepts_input() {
-=======
-                    if !matches!(
-                        prompt.kind,
-                        PromptKind::DeleteSecret | PromptKind::SavePolicy
-                    ) {
->>>>>>> origin/main
                         prompt.input.push(ch);
                         if prompt.kind == PromptKind::Command {
                             if let Some(command_line) = self.command_line.as_mut() {
@@ -3419,17 +3399,12 @@ impl<V: VaultApi + 'static> App<V> {
         let Some(mut prompt) = self.prompt.take() else {
             return;
         };
-<<<<<<< HEAD
         if prompt.kind == PromptKind::DestroyVersion {
             let typed = prompt.input.trim().to_owned();
             let expected = prompt.expected.unwrap_or_default();
             self.destroy_version(&typed, &expected);
             return;
         }
-        let name = prompt.input.trim().to_owned();
-        if name.is_empty() {
-            prompt.error = Some("name cannot be empty".to_owned());
-=======
         if prompt.kind == PromptKind::SavePolicy {
             let name = prompt.input.trim().to_owned();
             if name.is_empty() {
@@ -3443,17 +3418,10 @@ impl<V: VaultApi + 'static> App<V> {
         let input = prompt.input.trim().to_owned();
         if prompt.kind.requires_input() && input.is_empty() {
             prompt.error = Some(empty_prompt_message(prompt.kind).to_owned());
->>>>>>> origin/main
             self.prompt = Some(prompt);
             return;
         }
         match prompt.kind {
-<<<<<<< HEAD
-            PromptKind::NewSecret => self.create_secret(&name),
-            PromptKind::NewKey => self.add_key(&name),
-            PromptKind::DeleteSecret => self.delete_secret_metadata(&name),
-            PromptKind::DestroyVersion => {}
-=======
             PromptKind::Command => {
                 self.command_line = Some(CommandLineState {
                     input: input.clone(),
@@ -3463,7 +3431,7 @@ impl<V: VaultApi + 'static> App<V> {
             }
             PromptKind::NewSecret => self.create_secret(&input),
             PromptKind::NewKey => self.add_key(&input),
-            PromptKind::DeleteSecret => self.delete_secret(&input),
+            PromptKind::DeleteSecret => self.delete_secret_metadata(&input),
             PromptKind::ChildTokenPolicies => self.advance_child_policies(&input),
             PromptKind::ChildTokenTtl => self.advance_child_ttl(&input),
             PromptKind::ChildTokenUses => self.finish_child_token(&input),
@@ -3471,8 +3439,7 @@ impl<V: VaultApi + 'static> App<V> {
             PromptKind::WrapTtl => self.finish_wrap(&input),
             PromptKind::UnwrapToken => self.spawn_unwrap(&input),
             PromptKind::NewPolicy => self.create_policy(&input),
-            PromptKind::SavePolicy => {}
->>>>>>> origin/main
+            PromptKind::SavePolicy | PromptKind::DestroyVersion => {}
         }
     }
 
@@ -3491,6 +3458,7 @@ impl<V: VaultApi + 'static> App<V> {
                 input: String::new(),
                 error: Some("typed value does not match required version".to_owned()),
                 expected: Some(expected.to_owned()),
+                detail: None,
             });
             return;
         }
@@ -3525,11 +3493,8 @@ impl<V: VaultApi + 'static> App<V> {
                 kind: PromptKind::NewKey,
                 input: name.to_owned(),
                 error: Some("key already exists".to_owned()),
-<<<<<<< HEAD
                 expected: None,
-=======
                 detail: None,
->>>>>>> origin/main
             });
             return;
         }
@@ -3554,6 +3519,7 @@ impl<V: VaultApi + 'static> App<V> {
                 input: name.to_owned(),
                 error: Some(message),
                 detail: None,
+                expected: None,
             });
             return;
         }
@@ -3684,6 +3650,7 @@ impl<V: VaultApi + 'static> App<V> {
                     input,
                     error: Some(message),
                     detail: None,
+                    expected: None,
                 });
             }
         }
@@ -3798,6 +3765,7 @@ impl<V: VaultApi + 'static> App<V> {
                         input: name,
                         error: None,
                         detail: Some(detail),
+                        expected: None,
                     });
                 }
             },
@@ -3880,7 +3848,6 @@ fn secret_updated_text(path: &str) -> String {
     format!("Secret '{path}' updated successfully")
 }
 
-<<<<<<< HEAD
 fn caps_has(caps: &[String], capability: &str) -> bool {
     caps.iter().any(|entry| entry == capability)
 }
@@ -3911,7 +3878,8 @@ fn caps_allow_destroy(caps: &[String]) -> bool {
 
 fn caps_allow_undelete(caps: &[String]) -> bool {
     caps_has_root(caps) || caps_has(caps, "update")
-=======
+}
+
 const fn empty_prompt_message(kind: PromptKind) -> &'static str {
     match kind {
         PromptKind::NewSecret | PromptKind::NewKey => "name cannot be empty",
@@ -3950,7 +3918,6 @@ fn caps_allow(caps: &BTreeMap<String, Vec<String>>, path: &str) -> bool {
         list.iter()
             .any(|cap| matches!(cap.as_str(), "create" | "update" | "root"))
     })
->>>>>>> origin/main
 }
 
 #[cfg(test)]
@@ -3971,11 +3938,7 @@ mod tests {
 
     use super::*;
     use crate::clipboard::ClipboardError;
-<<<<<<< HEAD
-    use crate::model::{KvMetadata, KvVersionHistory, VersionMeta};
-=======
-    use crate::model::{KvMetadata, PolicyDocument, PolicyEntry};
->>>>>>> origin/main
+    use crate::model::{KvMetadata, KvVersionHistory, PolicyDocument, PolicyEntry, VersionMeta};
     use crate::vault::VaultApi;
 
     #[derive(Debug)]
@@ -4125,7 +4088,6 @@ mod tests {
             self.writes.lock().expect("writes lock").clone()
         }
 
-<<<<<<< HEAD
         fn insert_metadata(&self, mount: SecretPath, path: SecretPath, history: KvVersionHistory) {
             self.metadata
                 .lock()
@@ -4144,13 +4106,13 @@ mod tests {
                 .lock()
                 .expect("version data lock")
                 .insert((mount, path, version), data);
-=======
+        }
+
         fn policy_writes(&self) -> Vec<(String, String)> {
             self.policy_writes
                 .lock()
                 .expect("policy writes lock")
                 .clone()
->>>>>>> origin/main
         }
     }
 
@@ -5436,7 +5398,6 @@ mod tests {
         assert!(deleted);
     }
 
-<<<<<<< HEAD
     #[tokio::test]
     async fn secret_data_v_opens_versions_and_spawns_metadata_load() {
         let (mut app, mut rx, _vault) = test_app();
@@ -5588,7 +5549,8 @@ mod tests {
         assert_eq!(
             app.store.secrets(&parent),
             Some([SecretEntry::leaf("api")].as_slice())
-=======
+        );
+    }
     async fn drain_up_to(
         app: &mut App<FakeVault>,
         rx: &mut mpsc::UnboundedReceiver<Msg>,
@@ -5647,12 +5609,10 @@ mod tests {
                 key: "password".to_owned(),
                 text: ":".to_owned()
             }
->>>>>>> origin/main
         );
     }
 
     #[tokio::test]
-<<<<<<< HEAD
     async fn secrets_upper_d_metadata_delete_reloads_parent_listing() {
         let (mut app, mut rx, _vault) = test_app();
         app.state = AppState::Main(Mode::Secrets);
@@ -5884,7 +5844,10 @@ mod tests {
                 .lock()
                 .expect("undeletes lock")
                 .is_empty()
-=======
+        );
+    }
+
+    #[tokio::test]
     async fn command_token_opens_inspector_with_details_and_capabilities() {
         // Given: the engines view with a token that may manage tokens.
         let (mut app, mut rx, _vault) = test_app();
@@ -5919,12 +5882,10 @@ mod tests {
         assert_eq!(
             app.status.as_ref().map(|status| status.text.as_str()),
             Some("token renewed")
->>>>>>> origin/main
         );
     }
 
     #[tokio::test]
-<<<<<<< HEAD
     async fn versions_restore_reloads_history_with_current_generation() {
         let (mut app, mut rx, _vault) = test_app();
         app.state = AppState::Main(Mode::Versions);
@@ -5999,6 +5960,7 @@ mod tests {
             input: String::new(),
             error: None,
             expected: Some("3".to_owned()),
+            detail: None,
         });
 
         app.handle_input(key(KeyCode::Enter));
@@ -6010,7 +5972,8 @@ mod tests {
             Some("typed value does not match required version")
         );
     }
-=======
+
+    #[tokio::test]
     async fn child_token_prompt_chain_mints_token_shown_once() {
         // Given: an open token inspector with create rights.
         let (mut app, mut rx, _vault) = test_app();
@@ -6211,5 +6174,4 @@ mod tests {
         // Then: the previous mode is restored.
         assert_eq!(app.state, AppState::Main(Mode::SecretData));
     }
->>>>>>> origin/main
 }

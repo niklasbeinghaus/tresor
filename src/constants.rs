@@ -20,8 +20,6 @@ pub mod keys {
     pub const EDIT: char = 'e';
     /// `<c>` — copy the selected secret value to the clipboard.
     pub const COPY: char = 'c';
-    /// `:` — open the command line.
-    pub const COMMAND: char = ':';
     /// `<v>` — open the selected secret's version history.
     pub const VERSIONS: char = 'v';
     /// `<D>` — metadata delete the selected secret from listings.
@@ -32,6 +30,8 @@ pub mod keys {
     pub const UNDELETE: char = 'u';
     /// `<X>` — destroy a selected version permanently.
     pub const DESTROY: char = 'X';
+    /// `:` — open the command line.
+    pub const COMMAND: char = ':';
 }
 
 /// Page/view identifiers used for routing.

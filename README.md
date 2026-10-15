@@ -58,19 +58,14 @@ tracked with their reasoning in [`docs/out-of-scope.md`](docs/out-of-scope.md).
 | `x` | reveal secret value |
 | `e` | edit secret value; in the policies view, edit the selected policy in `$EDITOR` |
 | `c` | copy secret value |
-<<<<<<< HEAD
 | `v` | open versions (secret-data view) |
-| `n` | new secret (secrets view, when permitted) |
+| `n` | new secret (secrets view) / new policy (policies view), when permitted |
+| `d` | metadata-delete secret — with confirmation (secrets view) / soft-delete latest version (secret-data view), when permitted |
 | `D` | metadata-delete secret — with confirmation (secrets view, when permitted) |
-| `d` | soft-delete latest secret version (secret-data view, when permitted) |
 | `Enter` | preview selected version (versions view) |
 | `r` | restore selected version as latest (versions view, when permitted) |
 | `u` | undelete selected soft-deleted version (versions view, when permitted) |
 | `X` | destroy selected version — typed confirmation (versions view, when permitted) |
-=======
-| `n` | new secret / new policy (when permitted) |
-| `d` | delete secret — with confirmation (secrets view, when permitted) |
->>>>>>> origin/main
 | `a` | add key to the open secret (when permitted) |
 | `Ctrl+S` | save edits |
 | `Ctrl+R` | hard refresh current path |
@@ -103,8 +98,18 @@ only offers it when your token holds `create`, `update`, or `root` there.
 ### macOS & Linux — Homebrew
 
 ```bash
+brew tap njoerd114/tresor https://github.com/njoerd114/tresor
 brew install njoerd114/tresor/tresor
 ```
+
+The formula is `Formula/tresor.rb` in this repository — a tap is just a repo with a
+`Formula/` directory, so there is no separate tap repository. CI regenerates it
+(version + per-arch sha256) on every release via the `sync-manifests` job in
+`.github/workflows/release-please.yml`, so `brew upgrade` always tracks the latest tag.
+
+> Coming from the old `njoerd114/homebrew-tresor` tap? The tap name is unchanged, so
+> just repoint it: `brew tap --custom-remote njoerd114/tresor https://github.com/njoerd114/tresor`
+> (or `brew untap njoerd114/tresor` and tap again).
 
 ### Cargo (any platform with a Rust toolchain)
 
@@ -153,12 +158,14 @@ git clone https://github.com/njoerd114/tresor && cd tresor
 yay -Bi packaging/aur          # or: makepkg -si in packaging/aur
 ```
 
-AUR publication (`yay -S tresor`) is a maintainer step, not automated yet.
+`pkgver` is bumped automatically on each release; the `source` URL follows it. AUR
+publication (`yay -S tresor`) is a maintainer step, not automated yet.
 
 ### Windows
 
 ```powershell
-# scoop (manifest ships in the repo; add it to a bucket to get `scoop install tresor`)
+# scoop (manifest ships in the repo; its version + hash are synced by CI on
+# every release; add it to a bucket to get `scoop install tresor`)
 scoop install https://raw.githubusercontent.com/njoerd114/tresor/main/packaging/scoop/tresor.json
 ```
 
