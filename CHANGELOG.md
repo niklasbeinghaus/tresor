@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/njoerd114/tresor/compare/v0.5.0...v0.5.1) (2026-10-15)
+
+
+### Bug Fixes
+
+* **packaging:** sync manifests via PR and stop Renovate mangling the formula ([#47](https://github.com/njoerd114/tresor/issues/47)) ([76cfbcb](https://github.com/njoerd114/tresor/commit/76cfbcb949c01a0641a424c1095b5bbb82e693cd))
+
 ## [0.5.0](https://github.com/njoerd114/tresor/compare/v0.4.1...v0.5.0) (2026-10-15)
 
 
