@@ -738,7 +738,7 @@ impl<V: VaultApi + 'static> App<V> {
         if let Some(command) = PaletteCommand::resolve(typed) {
             return self.run_palette_command(command);
         }
-        let matches = Self::palette_matches(typed);
+        let matches = Self::palette_matches(&state.input);
         if let Some(command) = matches.get(state.selected.min(matches.len().saturating_sub(1))) {
             return self.run_palette_command(*command);
         }
