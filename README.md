@@ -48,13 +48,12 @@ tracked with their reasoning in [`docs/out-of-scope.md`](docs/out-of-scope.md).
 
 | Key | Action |
 |---|---|
-| `:` | command palette — `:ctx` switch profile, `:filter`, `:quit` |
+| `:` | command palette — type to filter the list, `Enter` runs it: `ctx`, `filter`, `policies`, `token`/`t`, `wrap`/`w`, `unwrap`/`u`, `quit` |
 | `/` | fuzzy filter the focused list (`Esc` clears) |
 | `Enter` | select / drill down / open secret |
 | `Esc` | back one level / cancel |
 | `↑ ↓` / `j k` | move selection |
 | `Tab` | next key (secret data view) |
-| `:` | open the command bar (`:policies` opens the ACL policy browser) |
 | `x` | reveal secret value |
 | `e` | edit secret value; in the policies view, edit the selected policy in `$EDITOR` |
 | `c` | copy secret value |
@@ -69,7 +68,6 @@ tracked with their reasoning in [`docs/out-of-scope.md`](docs/out-of-scope.md).
 | `a` | add key to the open secret (when permitted) |
 | `Ctrl+S` | save edits |
 | `Ctrl+R` | hard refresh current path |
-| `:` | command palette (`token`, `t`, `unwrap`, `u`, `wrap`, `w`) |
 | `r` | renew the active token (token inspector) |
 | `n` | create a child token (token inspector, when permitted) |
 | `w` | wrap a JSON payload (token inspector, when permitted) |
@@ -80,7 +78,7 @@ tracked with their reasoning in [`docs/out-of-scope.md`](docs/out-of-scope.md).
 ## Policies
 
 Open the ACL policy browser with the `:policies` command (`:` opens the command
-bar at the bottom of the screen). The left pane lists every ACL policy
+palette — type `pol` and press `Enter`). The left pane lists every ACL policy
 (`GET sys/policies/acl`, with a `GET ?list=true` fallback for gateways that
 reject the `LIST` verb); the right pane previews the selected policy's HCL text
 read-only. Policy text that Vault returns `base64:`-prefixed is decoded for

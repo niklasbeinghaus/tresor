@@ -1,6 +1,5 @@
 //! Terminal UI views (ratatui renderers). One module per screen.
 
-pub mod command_line;
 pub mod commands;
 pub mod contexts;
 pub mod engines;

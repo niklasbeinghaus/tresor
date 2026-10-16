@@ -187,11 +187,6 @@ impl Permission {
 /// Optional transient input or status rendered in place of the key hints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandBarInput<'a> {
-    /// The `:` command palette is capturing input.
-    Command {
-        /// Text typed after `:`.
-        input: &'a str,
-    },
     /// A list filter is active; show the query and match count.
     Filter {
         /// Filter query typed after `/`.
@@ -248,8 +243,8 @@ pub fn draw_commands(
     draw_commands_with_input(frame, area, page, permission, None, theme);
 }
 
-/// Draws the command bar, replacing the key hints with the active `:` command
-/// input or `/` filter status when one is given.
+/// Draws the command bar, replacing the key hints with `/` filter status when
+/// a filter is active.
 pub fn draw_commands_with_input(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -259,7 +254,6 @@ pub fn draw_commands_with_input(
     theme: &Theme,
 ) {
     let line = match input {
-        Some(CommandBarInput::Command { input }) => command_line(input, theme),
         Some(CommandBarInput::Filter {
             query,
             matched,
@@ -300,19 +294,6 @@ fn hints_line(page: Page, permission: Permission, area: Rect, theme: &Theme) -> 
             .add_modifier(Modifier::BOLD),
     ));
     Line::from(spans)
-}
-
-fn command_line(input: &str, theme: &Theme) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            ":",
-            Style::default()
-                .fg(theme.title)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(input.to_owned(), Style::default().fg(theme.selected_fg)),
-        Span::styled("█", Style::default().fg(theme.title)),
-    ])
 }
 
 fn filter_line(query: &str, matched: usize, total: usize, theme: &Theme) -> Line<'static> {
@@ -536,21 +517,6 @@ mod tests {
             out.push('\n');
         }
         out
-    }
-
-    #[test]
-    fn commands_bar_shows_command_prompt_when_command_input_active() {
-        // Given: the `:` command palette is capturing input.
-        let output = render_input(
-            100,
-            1,
-            Page::Engines,
-            CommandBarInput::Command { input: "ctx" },
-        );
-
-        // Then: the bar shows the prompt instead of the key hints.
-        assert_snapshot!("commands_command_input", output);
-        assert!(output.contains(":ctx"));
     }
 
     #[test]

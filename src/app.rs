@@ -26,7 +26,6 @@ use crate::profiles::{ConnectRequest, Profile, Profiles};
 use crate::state::Mode;
 use crate::store::{CacheKey, Msg, Store};
 use crate::theme::Theme;
-use crate::ui::command_line::{CommandLineModel, draw_command_line};
 use crate::ui::commands::{CommandBarInput, Page, Permission, draw_commands_with_input};
 use crate::ui::contexts::{ContextRow, ContextsModel, draw_contexts};
 use crate::ui::engines::{EnginesModel, draw_engines};
@@ -60,15 +59,6 @@ pub struct PromptState {
     pub expected: Option<String>,
     /// Optional detail line shown in confirm prompts.
     pub detail: Option<String>,
-}
-
-/// Inline `:` command-line state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandLineState {
-    /// Command text without leading `:`.
-    pub input: String,
-    /// Optional command parse/dispatch error.
-    pub error: Option<String>,
 }
 
 /// Pending policy save payload between editor close and confirmation.
@@ -126,6 +116,8 @@ pub struct PaletteState {
     pub input: String,
     /// Selected command index.
     pub selected: usize,
+    /// Optional command parse/dispatch error.
+    pub error: Option<String>,
 }
 
 /// State of the `:ctx` connection picker overlay.
@@ -174,6 +166,10 @@ pub struct FilterState {
 enum PaletteCommand {
     Contexts,
     Filter,
+    Policies,
+    Token,
+    Unwrap,
+    Wrap,
     Quit,
 }
 
@@ -182,6 +178,10 @@ impl PaletteCommand {
         match self {
             Self::Contexts => "ctx",
             Self::Filter => "filter",
+            Self::Policies => "policies",
+            Self::Token => "token",
+            Self::Unwrap => "unwrap",
+            Self::Wrap => "wrap",
             Self::Quit => "quit",
         }
     }
@@ -190,16 +190,47 @@ impl PaletteCommand {
         match self {
             Self::Contexts => "switch connection context",
             Self::Filter => "filter the focused list",
+            Self::Policies => "browse ACL policies",
+            Self::Token => "inspect the active token",
+            Self::Unwrap => "unwrap a wrapping token",
+            Self::Wrap => "wrap a JSON payload",
             Self::Quit => "exit tresor",
         }
     }
+
+    /// Short forms accepted on the palette input.
+    const fn aliases(self) -> &'static [&'static str] {
+        match self {
+            Self::Contexts => &["context", "contexts"],
+            Self::Token => &["t"],
+            Self::Wrap => &["w"],
+            Self::Unwrap => &["u"],
+            Self::Quit => &["q"],
+            Self::Filter | Self::Policies => &[],
+        }
+    }
+
+    /// Resolves a complete command name or alias; fuzzy suggestions do not count.
+    fn resolve(input: &str) -> Option<Self> {
+        PALETTE_COMMANDS
+            .into_iter()
+            .find(|command| command.label() == input || command.aliases().contains(&input))
+    }
 }
 
-const PALETTE_COMMANDS: [PaletteCommand; 3] = [
+const PALETTE_COMMANDS: [PaletteCommand; 7] = [
     PaletteCommand::Contexts,
     PaletteCommand::Filter,
+    PaletteCommand::Policies,
+    PaletteCommand::Token,
+    PaletteCommand::Unwrap,
+    PaletteCommand::Wrap,
     PaletteCommand::Quit,
 ];
+
+/// Shown when the palette input is submitted empty.
+const PALETTE_EMPTY_HINT: &str =
+    "enter a command: ctx, filter, policies, token, wrap, unwrap, quit";
 
 /// Header information loaded from Vault after connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -370,8 +401,6 @@ pub struct App<V: VaultApi> {
     pub token_can_wrap: bool,
     /// Whether the token capability probe has resolved (gating fails closed until then).
     token_caps_loaded: bool,
-    /// Active `:` command line, if any.
-    pub command_line: Option<CommandLineState>,
     /// Selected row in the policies view.
     pub policies_selected: usize,
     /// Current selected policy write capability.
@@ -494,7 +523,6 @@ impl<V: VaultApi + 'static> App<V> {
                 token_can_create: false,
                 token_can_wrap: false,
                 token_caps_loaded: false,
-                command_line: None,
                 policies_selected: 0,
                 policy_can_write: false,
                 pending_policy_edit: None,
@@ -618,9 +646,6 @@ impl<V: VaultApi + 'static> App<V> {
         if self.prompt.is_some() {
             return self.handle_prompt_input(key);
         }
-        if self.command_line.is_some() {
-            return self.handle_command_line_input(key);
-        }
         if self.overlay.is_some() {
             return self.handle_overlay_input(key);
         }
@@ -639,7 +664,7 @@ impl<V: VaultApi + 'static> App<V> {
         }
         if matches!(self.state, AppState::Main(_)) && !self.inside_secret_editor() {
             if key.code == KeyCode::Char(':') {
-                self.open_command_prompt();
+                self.open_command_palette();
                 return false;
             }
             if key.code == KeyCode::Char('/')
@@ -678,14 +703,7 @@ impl<V: VaultApi + 'static> App<V> {
                 self.overlay = None;
                 return false;
             }
-            KeyCode::Enter => {
-                let matches = Self::palette_matches(&state.input);
-                let Some(command) = matches.get(state.selected).copied() else {
-                    self.overlay = Some(Overlay::Command(state));
-                    return false;
-                };
-                return self.run_palette_command(command);
-            }
+            KeyCode::Enter => return self.submit_palette(&state),
             KeyCode::Up => {
                 state.selected = state.selected.saturating_sub(1);
             }
@@ -696,15 +714,45 @@ impl<V: VaultApi + 'static> App<V> {
             KeyCode::Backspace => {
                 state.input.pop();
                 state.selected = 0;
+                state.error = None;
             }
             KeyCode::Char(ch) => {
                 state.input.push(ch);
                 state.selected = 0;
+                state.error = None;
             }
             _ => {}
         }
         self.overlay = Some(Overlay::Command(state));
         false
+    }
+
+    /// Runs an exact command, else the highlighted fuzzy suggestion, else reports
+    /// the unknown command in the still-open palette.
+    fn submit_palette(&mut self, state: &PaletteState) -> bool {
+        let typed = state.input.trim();
+        if typed.is_empty() {
+            self.reopen_palette(&state.input, PALETTE_EMPTY_HINT);
+            return false;
+        }
+        if let Some(command) = PaletteCommand::resolve(typed) {
+            return self.run_palette_command(command);
+        }
+        let matches = Self::palette_matches(typed);
+        if let Some(command) = matches.get(state.selected.min(matches.len().saturating_sub(1))) {
+            return self.run_palette_command(*command);
+        }
+        let message = format!("unknown command: {typed}");
+        self.reopen_palette(&state.input, &message);
+        false
+    }
+
+    fn reopen_palette(&mut self, input: &str, error: &str) {
+        self.overlay = Some(Overlay::Command(PaletteState {
+            input: input.to_owned(),
+            selected: 0,
+            error: Some(error.to_owned()),
+        }));
     }
 
     fn handle_contexts_input(&mut self, key: KeyEvent, mut state: ContextsState) -> bool {
@@ -749,6 +797,7 @@ impl<V: VaultApi + 'static> App<V> {
         self.overlay = Some(Overlay::Command(PaletteState {
             input: String::new(),
             selected: 0,
+            error: None,
         }));
     }
 
@@ -768,6 +817,24 @@ impl<V: VaultApi + 'static> App<V> {
             }
             PaletteCommand::Filter => {
                 self.open_filter();
+                false
+            }
+            PaletteCommand::Policies => {
+                self.open_policies();
+                false
+            }
+            PaletteCommand::Token => {
+                self.open_token_view();
+                false
+            }
+            PaletteCommand::Unwrap => {
+                self.open_token_view();
+                self.open_unwrap_prompt();
+                false
+            }
+            PaletteCommand::Wrap => {
+                self.open_token_view();
+                self.open_wrap_prompt();
                 false
             }
             PaletteCommand::Quit => true,
@@ -954,6 +1021,7 @@ impl<V: VaultApi + 'static> App<V> {
             query: state.input.clone(),
             rows,
             selected,
+            error: state.error.clone(),
         }
     }
 
@@ -1370,13 +1438,8 @@ impl<V: VaultApi + 'static> App<V> {
         }
     }
 
-    /// Optional command bar input (either `:` command text or `/` filter status).
+    /// Optional command bar input (`/` filter status when active).
     pub fn command_bar_input(&self) -> Option<CommandBarInput<'_>> {
-        if let Some(Overlay::Command(state)) = &self.overlay {
-            return Some(CommandBarInput::Command {
-                input: state.input.as_str(),
-            });
-        }
         let filter = self.filter.as_ref()?;
         if filter.scope == self.current_filter_scope() {
             let (matched, total) = self.current_list_counts();
@@ -1509,14 +1572,6 @@ impl<V: VaultApi + 'static> App<V> {
         }
     }
 
-    /// Builds the pure command-line render model.
-    pub fn command_line_model(&self) -> Option<CommandLineModel> {
-        self.command_line.as_ref().map(|state| CommandLineModel {
-            input: state.input.clone(),
-            error: state.error.clone(),
-        })
-    }
-
     /// Builds a pure modal render model.
     pub fn modal_model(&self, addr: String, token: String, focus: ModalField) -> ModalModel {
         ModalModel {
@@ -1586,18 +1641,14 @@ impl<V: VaultApi + 'static> App<V> {
             return;
         };
         draw_header(frame, *header_area, &self.header_model(), &self.theme);
-        if let Some(model) = self.command_line_model() {
-            draw_command_line(frame, *commands_area, &model, &self.theme);
-        } else {
-            draw_commands_with_input(
-                frame,
-                *commands_area,
-                self.commands_page(),
-                self.permission(),
-                self.command_bar_input(),
-                &self.theme,
-            );
-        }
+        draw_commands_with_input(
+            frame,
+            *commands_area,
+            self.commands_page(),
+            self.permission(),
+            self.command_bar_input(),
+            &self.theme,
+        );
         match self.state {
             AppState::ConfigInput => draw_modal(
                 frame,
@@ -2062,21 +2113,6 @@ impl<V: VaultApi + 'static> App<V> {
         self.spawn_token_capabilities(self.store.generation());
     }
 
-    fn open_command_prompt(&mut self) {
-        self.open_command_palette();
-        self.command_line = Some(CommandLineState {
-            input: String::new(),
-            error: None,
-        });
-        self.prompt = Some(PromptState {
-            kind: PromptKind::Command,
-            input: String::new(),
-            error: None,
-            detail: None,
-            expected: None,
-        });
-    }
-
     fn open_child_token_prompt(&mut self) {
         if self.token_caps_loaded && !self.token_can_create {
             self.set_status(StatusKind::Error, "no permission to create child tokens");
@@ -2110,12 +2146,6 @@ impl<V: VaultApi + 'static> App<V> {
 
     fn reopen_prompt(&mut self, kind: PromptKind, error: impl Into<String>) {
         let message = error.into();
-        if kind == PromptKind::Command {
-            self.command_line = Some(CommandLineState {
-                input: String::new(),
-                error: Some(message.clone()),
-            });
-        }
         self.prompt = Some(PromptState {
             kind,
             input: String::new(),
@@ -2123,44 +2153,6 @@ impl<V: VaultApi + 'static> App<V> {
             detail: None,
             expected: None,
         });
-    }
-
-    fn run_command(&mut self, input: &str) {
-        let command = input.split_whitespace().next().unwrap_or_default();
-        match command {
-            "ctx" | "context" | "contexts" => {
-                self.prompt = None;
-                self.command_line = None;
-                self.open_contexts();
-            }
-            "filter" => {
-                self.prompt = None;
-                self.command_line = None;
-                self.open_filter();
-            }
-            "policies" => {
-                self.prompt = None;
-                self.command_line = None;
-                self.open_policies();
-            }
-            "token" | "t" => self.open_token_view(),
-            "unwrap" | "u" => {
-                self.open_token_view();
-                self.open_unwrap_prompt();
-            }
-            "wrap" | "w" => {
-                self.open_token_view();
-                self.open_wrap_prompt();
-            }
-            other => {
-                let message = if other.is_empty() {
-                    "enter a command: token, unwrap, wrap, policies".to_owned()
-                } else {
-                    format!("unknown command: {other}")
-                };
-                self.reopen_prompt(PromptKind::Command, message);
-            }
-        }
     }
 
     fn advance_child_policies(&mut self, input: &str) {
@@ -3361,18 +3353,12 @@ impl<V: VaultApi + 'static> App<V> {
                     self.set_status(StatusKind::Info, "policy save cancelled");
                 }
                 self.prompt = None;
-                self.command_line = None;
                 self.child_draft = None;
                 self.wrap_payload = None;
             }
             KeyCode::Enter => self.submit_prompt(),
             KeyCode::Backspace => {
                 if let Some(prompt) = self.prompt.as_mut() {
-                    if prompt.kind == PromptKind::Command {
-                        if let Some(command_line) = self.command_line.as_mut() {
-                            command_line.input.pop();
-                        }
-                    }
                     if prompt.kind.accepts_input() {
                         prompt.input.pop();
                     }
@@ -3382,11 +3368,6 @@ impl<V: VaultApi + 'static> App<V> {
                 if let Some(prompt) = self.prompt.as_mut() {
                     if prompt.kind.accepts_input() {
                         prompt.input.push(ch);
-                        if prompt.kind == PromptKind::Command {
-                            if let Some(command_line) = self.command_line.as_mut() {
-                                command_line.input.push(ch);
-                            }
-                        }
                     }
                 }
             }
@@ -3422,13 +3403,6 @@ impl<V: VaultApi + 'static> App<V> {
             return;
         }
         match prompt.kind {
-            PromptKind::Command => {
-                self.command_line = Some(CommandLineState {
-                    input: input.clone(),
-                    error: None,
-                });
-                self.run_command(&input);
-            }
             PromptKind::NewSecret => self.create_secret(&input),
             PromptKind::NewKey => self.add_key(&input),
             PromptKind::DeleteSecret => self.delete_secret_metadata(&input),
@@ -3584,80 +3558,7 @@ impl<V: VaultApi + 'static> App<V> {
         });
     }
 
-    fn handle_command_line_input(&mut self, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Esc => self.command_line = None,
-            KeyCode::Backspace => {
-                if let Some(command_line) = self.command_line.as_mut() {
-                    command_line.input.pop();
-                }
-            }
-            KeyCode::Enter => self.submit_command_line(),
-            KeyCode::Char(ch) => {
-                if let Some(command_line) = self.command_line.as_mut() {
-                    command_line.input.push(ch);
-                }
-            }
-            _ => {}
-        }
-        false
-    }
-
-    fn submit_command_line(&mut self) {
-        let Some(input) = self.command_line.as_ref().map(|state| state.input.clone()) else {
-            return;
-        };
-        let command = input.trim().to_owned();
-        if command.is_empty() {
-            self.command_line = None;
-            self.prompt = None;
-            self.overlay = None;
-            return;
-        }
-        self.overlay = None;
-        match command.as_str() {
-            "ctx" | "context" | "contexts" => {
-                self.command_line = None;
-                self.open_contexts();
-            }
-            "filter" => {
-                self.command_line = None;
-                self.open_filter();
-            }
-            "policies" => self.open_policies(),
-            "token" | "t" => {
-                self.command_line = None;
-                self.open_token_view();
-            }
-            "unwrap" | "u" => {
-                self.command_line = None;
-                self.open_token_view();
-                self.open_unwrap_prompt();
-            }
-            "wrap" | "w" => {
-                self.command_line = None;
-                self.open_token_view();
-                self.open_wrap_prompt();
-            }
-            other => {
-                let message = format!("unknown command: {other}");
-                self.command_line = Some(CommandLineState {
-                    input: input.clone(),
-                    error: Some(message.clone()),
-                });
-                self.prompt = Some(PromptState {
-                    kind: PromptKind::Command,
-                    input,
-                    error: Some(message),
-                    detail: None,
-                    expected: None,
-                });
-            }
-        }
-    }
-
     fn open_policies(&mut self) {
-        self.command_line = None;
         self.state = AppState::Main(Mode::Policies);
         self.policies_selected = 0;
         self.policy_can_write = false;
@@ -4523,9 +4424,48 @@ mod tests {
             app.overlay,
             Some(Overlay::Command(PaletteState {
                 input: String::new(),
-                selected: 0
+                selected: 0,
+                error: None,
             }))
         );
+    }
+
+    #[test]
+    fn colon_then_typing_updates_palette_query() {
+        // Given: an app in the engines view.
+        let (mut app, _rx, _vault) = test_app();
+
+        // When: `:` is pressed and `pol` is typed.
+        app.handle_input(key(KeyCode::Char(':')));
+        for ch in "pol".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+
+        // Then: the visible palette query reflects the typed characters
+        // (issue #50: typing used to land in a hidden duplicate surface).
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::Command(PaletteState {
+                input: "pol".to_owned(),
+                selected: 0,
+                error: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn colon_opens_only_one_command_surface() {
+        // Given: an app in the engines view.
+        let (mut app, _rx, _vault) = test_app();
+
+        // When: `:` is pressed.
+        app.handle_input(key(KeyCode::Char(':')));
+
+        // Then: exactly one `:` surface exists; neither the prompt popup nor a
+        // second command-bar row duplicates the palette.
+        assert_eq!(app.prompt, None);
+        assert_eq!(app.command_bar_input(), None);
+        assert!(matches!(app.overlay, Some(Overlay::Command(_))));
     }
 
     #[test]
@@ -4862,6 +4802,55 @@ mod tests {
     }
 
     #[test]
+    fn draw_keeps_query_inside_the_palette_not_the_command_bar() {
+        // Given: the palette open with `pol` typed (issue #50).
+        let (mut app, _rx, _vault) = test_app();
+        app.app_version = "0.1.0".to_owned();
+        app.handle_input(key(KeyCode::Char(':')));
+        for ch in "pol".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        let backend = TestBackend::new(80, 14);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut screen = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                screen.push_str(
+                    buffer
+                        .cell((x, y))
+                        .map_or("", ratatui::buffer::Cell::symbol),
+                );
+            }
+            screen.push('\n');
+        }
+        // The command bar is the single row between the 5-row header and the body.
+        let command_bar: String = (0..buffer.area.width)
+            .map(|x| {
+                buffer
+                    .cell((x, 5))
+                    .map_or("", ratatui::buffer::Cell::symbol)
+            })
+            .collect();
+
+        // Then: the query renders once, inside the popup, and the command bar keeps
+        // its key hints instead of mirroring a second `:` input row.
+        assert!(screen.contains(":pol"), "palette should show the query");
+        assert!(
+            screen.contains(":policies"),
+            "palette should suggest the matching command"
+        );
+        assert!(
+            !command_bar.contains(':'),
+            "command bar duplicated the palette input: {command_bar:?}"
+        );
+    }
+
+    #[test]
     fn new_secret_prompt_gated_by_permission_when_read_only() {
         // Given: a read-only token in the secrets view.
         let (mut app, _rx, _vault) = test_app();
@@ -4877,7 +4866,7 @@ mod tests {
     }
 
     #[test]
-    fn command_line_switches_to_policies() {
+    fn command_palette_switches_to_policies() {
         let (mut app, _rx, _vault) = test_app();
         app.handle_input(key(KeyCode::Char(':')));
         for ch in "policies".chars() {
@@ -4885,20 +4874,118 @@ mod tests {
         }
         app.handle_input(key(KeyCode::Enter));
         assert_eq!(app.state, AppState::Main(Mode::Policies));
-        assert!(app.command_line.is_none());
+        assert!(app.overlay.is_none());
     }
 
     #[test]
-    fn command_line_unknown_sets_error() {
+    fn command_palette_unknown_command_sets_error() {
         let (mut app, _rx, _vault) = test_app();
         app.handle_input(key(KeyCode::Char(':')));
-        app.handle_input(key(KeyCode::Char('x')));
+        for ch in "zzz".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
         app.handle_input(key(KeyCode::Enter));
         assert_eq!(
-            app.command_line
-                .as_ref()
-                .and_then(|state| state.error.clone()),
-            Some("unknown command: x".to_owned())
+            app.overlay,
+            Some(Overlay::Command(PaletteState {
+                input: "zzz".to_owned(),
+                selected: 0,
+                error: Some("unknown command: zzz".to_owned()),
+            }))
+        );
+    }
+
+    #[test]
+    fn command_palette_typing_clears_error() {
+        let (mut app, _rx, _vault) = test_app();
+        app.handle_input(key(KeyCode::Char(':')));
+        for ch in "zzz".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+        app.handle_input(key(KeyCode::Enter));
+
+        app.handle_input(key(KeyCode::Char('p')));
+
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::Command(PaletteState {
+                input: "zzzp".to_owned(),
+                selected: 0,
+                error: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn command_palette_enter_runs_highlighted_suggestion_for_partial_input() {
+        let (mut app, _rx, _vault) = test_app();
+        app.handle_input(key(KeyCode::Char(':')));
+        for ch in "pol".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+
+        app.handle_input(key(KeyCode::Enter));
+
+        assert_eq!(app.state, AppState::Main(Mode::Policies));
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn command_palette_arrow_keys_move_selection() {
+        let (mut app, _rx, _vault) = test_app();
+        app.handle_input(key(KeyCode::Char(':')));
+
+        app.handle_input(key(KeyCode::Down));
+
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::Command(PaletteState {
+                input: String::new(),
+                selected: 1,
+                error: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn command_palette_quit_command_quits() {
+        let (mut app, _rx, _vault) = test_app();
+        app.handle_input(key(KeyCode::Char(':')));
+        for ch in "quit".chars() {
+            app.handle_input(key(KeyCode::Char(ch)));
+        }
+
+        let quit = app.handle_input(key(KeyCode::Enter));
+
+        assert!(quit);
+    }
+
+    #[test]
+    fn command_palette_token_alias_opens_token_view() {
+        let (mut app, _rx, _vault) = test_app();
+        app.handle_input(key(KeyCode::Char(':')));
+        app.handle_input(key(KeyCode::Char('t')));
+
+        app.handle_input(key(KeyCode::Enter));
+
+        assert_eq!(app.state, AppState::Main(Mode::Token));
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn command_palette_enter_on_empty_input_shows_hint_error() {
+        let (mut app, _rx, _vault) = test_app();
+        app.handle_input(key(KeyCode::Char(':')));
+
+        app.handle_input(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::Command(PaletteState {
+                input: String::new(),
+                selected: 0,
+                error: Some(PALETTE_EMPTY_HINT.to_owned()),
+            }))
         );
     }
 
@@ -4909,7 +4996,7 @@ mod tests {
 
         app.handle_input(key(KeyCode::Char(':')));
 
-        assert!(app.command_line.is_none());
+        assert!(app.overlay.is_none());
         assert_eq!(app.modal_addr, ":");
     }
 
@@ -5565,18 +5652,16 @@ mod tests {
     }
 
     #[test]
-    fn colon_opens_command_prompt_outside_editor() {
+    fn colon_opens_sole_command_surface_outside_editor() {
         // Given: the engines view.
         let (mut app, _rx, _vault) = test_app();
 
         // When: `:` is pressed.
         app.handle_input(key(KeyCode::Char(':')));
 
-        // Then: the command prompt opens.
-        assert_eq!(
-            app.prompt.as_ref().map(|prompt| prompt.kind),
-            Some(PromptKind::Command)
-        );
+        // Then: the command palette opens and no prompt popup shadows it.
+        assert!(matches!(app.overlay, Some(Overlay::Command(_))));
+        assert_eq!(app.prompt, None);
     }
 
     #[test]
@@ -6077,7 +6162,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_command_keeps_prompt_open_with_error() {
+    fn unknown_command_keeps_palette_open_with_error() {
         // Given: the command palette.
         let (mut app, _rx, _vault) = test_app();
         app.handle_input(key(KeyCode::Char(':')));
@@ -6088,10 +6173,11 @@ mod tests {
         // When: an unknown command is submitted.
         app.handle_input(key(KeyCode::Enter));
 
-        // Then: the prompt stays open with an explanatory error.
-        let prompt = app.prompt.as_ref().expect("prompt");
-        assert_eq!(prompt.kind, PromptKind::Command);
-        assert!(prompt.error.is_some());
+        // Then: the palette stays open with an explanatory error.
+        let Some(Overlay::Command(state)) = app.overlay else {
+            panic!("palette should stay open");
+        };
+        assert!(state.error.is_some());
     }
 
     #[test]
