@@ -19,8 +19,6 @@ pub enum PromptKind {
     DeleteSecret,
     /// Confirmation before permanently destroying one secret version.
     DestroyVersion,
-    /// A `:` command-palette entry.
-    Command,
     /// Policies for a child token (comma/space separated).
     ChildTokenPolicies,
     /// TTL for a child token (e.g. `1h`; blank for the server default).
@@ -48,7 +46,6 @@ impl PromptKind {
             Self::NewKey => "New Key",
             Self::DeleteSecret => "Delete Secret",
             Self::DestroyVersion => "Destroy Version",
-            Self::Command => "Command",
             Self::ChildTokenPolicies => "Child Token: Policies",
             Self::ChildTokenTtl => "Child Token: TTL",
             Self::ChildTokenUses => "Child Token: Use Limit",
@@ -68,7 +65,6 @@ impl PromptKind {
             Self::NewKey => "Key name",
             Self::DeleteSecret | Self::SavePolicy => "Confirm",
             Self::DestroyVersion => "Type version",
-            Self::Command => "Command",
             Self::ChildTokenPolicies => "Policies (comma separated)",
             Self::ChildTokenTtl => "TTL (e.g. 1h)",
             Self::ChildTokenUses => "Use limit",
@@ -206,7 +202,6 @@ fn field_line(model: &PromptModel, theme: &Theme) -> Line<'static> {
         PromptKind::NewSecret
         | PromptKind::NewKey
         | PromptKind::NewPolicy
-        | PromptKind::Command
         | PromptKind::ChildTokenPolicies
         | PromptKind::ChildTokenTtl
         | PromptKind::ChildTokenUses

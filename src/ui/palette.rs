@@ -26,6 +26,8 @@ pub struct PaletteModel {
     pub rows: Vec<PaletteRow>,
     /// Selected row index into `rows`.
     pub selected: usize,
+    /// Optional command dispatch error (e.g. unknown command).
+    pub error: Option<String>,
 }
 
 /// Most rows the palette popup shows at once.
@@ -67,13 +69,21 @@ pub fn draw_palette(frame: &mut Frame<'_>, area: Rect, model: &PaletteModel, the
     };
 
     frame.render_widget(Paragraph::new(palette_input(model, theme)), *input_row);
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            "enter run │ esc cancel",
-            Style::default().fg(theme.masked_fg),
-        )),
-        *hint_row,
+    let hint = model.error.as_ref().map_or_else(
+        || {
+            Line::from(Span::styled(
+                "enter run │ esc cancel",
+                Style::default().fg(theme.masked_fg),
+            ))
+        },
+        |error| {
+            Line::from(Span::styled(
+                error.as_str(),
+                Style::default().fg(theme.status_error),
+            ))
+        },
     );
+    frame.render_widget(Paragraph::new(hint), *hint_row);
 
     let list_width = usize::from(list_row.width);
     let lines: Vec<Line<'_>> = if model.rows.is_empty() {
@@ -207,6 +217,7 @@ mod tests {
             query: String::new(),
             rows: rows(),
             selected: 0,
+            error: None,
         };
 
         // When: the palette is rendered.
@@ -229,6 +240,7 @@ mod tests {
                 description: "filter the focused list".to_owned(),
             }],
             selected: 0,
+            error: None,
         };
 
         // When: the palette is rendered.
@@ -247,6 +259,7 @@ mod tests {
             query: "zzz".to_owned(),
             rows: Vec::new(),
             selected: 0,
+            error: None,
         };
 
         // When: the palette is rendered.
@@ -255,5 +268,24 @@ mod tests {
         // Then: the empty-state line is shown.
         assert_snapshot!("palette_empty", output);
         assert!(output.contains("(no matching commands)"));
+    }
+
+    #[test]
+    fn palette_shows_error_when_present() {
+        // Given: a query that failed to resolve to a command.
+        let model = PaletteModel {
+            query: "zzz".to_owned(),
+            rows: Vec::new(),
+            selected: 0,
+            error: Some("unknown command: zzz".to_owned()),
+        };
+
+        // When: the palette is rendered.
+        let output = render(&model);
+
+        // Then: the error replaces the confirm hint line.
+        assert_snapshot!("palette_error", output);
+        assert!(output.contains("unknown command: zzz"));
+        assert!(!output.contains("enter run"));
     }
 }

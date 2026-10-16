@@ -23,7 +23,7 @@ src/
 ├── editor.rs      # TextEditor trait + CommandTextEditor ($VISUAL→$EDITOR), temp-file handoff
 ├── theme.rs       # semantic palette + sofka skins (catppuccin/gruvbox); default = sofka mocha
 ├── sofka.rs       # reuses ~/.config/sofka config [skin] (name + color overrides), graceful fallback
-└── ui/            # PURE renderers: header, engines, secrets, secret_data, token, policies, command_line, modal, prompt (+ insta snapshots)
+└── ui/            # PURE renderers: header, engines, secrets, secret_data, token, policies, palette, modal, prompt (+ insta snapshots)
 tests/vault_integration.rs  # wiremock wire-level tests of VaultClient
 scripts/dev-vault.sh + seed-vault.sh  # local `vault server -dev` + KV2 seed data
 scripts/sync-packaging.sh  # release step: regenerates Formula/tresor.rb + scoop/AUR pins from a tag
@@ -59,7 +59,7 @@ packaging/                 # scoop manifest + AUR PKGBUILD (pins rewritten by sy
   open secrets) and only enables `n new secret` / `a add key` when `create`/`update`
   (or `root`) is present. Probing shares the load task's generation — never bump in
   the probe or the list result is dropped as stale.
-- ACL policies: `:policies` (a `:` command bar overlay, not a `Mode`) opens the
+- ACL policies: `:policies` (the `:` command palette, not a `Mode`) opens the
   root-level `Mode::Policies` page. List via `GET sys/policies/acl` (LIST verb +
   `GET ?list=true` fallback, like KV), read via `GET sys/policies/acl/{name}` —
   decode a `base64:`-prefixed `policy` field. The view is read-only; editing hands
