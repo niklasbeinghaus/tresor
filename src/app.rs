@@ -4708,7 +4708,31 @@ mod tests {
         assert_eq!(app.state, AppState::Main(Mode::Engines));
         assert_eq!(
             app.status.as_ref().map(|status| status.text.as_str()),
-            Some("'legacy' is a KV v1 mount; only KV2 engines can be browsed")
+            Some("'legacy' is a kv v1 mount; only KV2 engines can be browsed")
+        );
+    }
+
+    #[tokio::test]
+    async fn engines_enter_when_unversioned_kv_engine_selected_warns_without_navigating() {
+        // Given: `vault secrets enable kv` without `-version` — a `kv` mount whose
+        // `options` are null, which the server treats as KV1. Browsing it with KV2
+        // endpoints is exactly the 404 this change exists to prevent.
+        let (mut app, _rx, _vault) = test_app();
+        let generation = app.store.bump_generation();
+        app.apply(Msg::EnginesLoaded {
+            generation,
+            entries: vec![engine_typed("unversioned", "kv", None)],
+        });
+
+        // When: Enter is pressed on it.
+        let quit = app.handle_input(key(KeyCode::Enter));
+
+        // Then: it does not navigate, and says why.
+        assert!(!quit);
+        assert_eq!(app.state, AppState::Main(Mode::Engines));
+        assert_eq!(
+            app.status.as_ref().map(|status| status.text.as_str()),
+            Some("'unversioned' is a kv v1 mount; only KV2 engines can be browsed")
         );
     }
 

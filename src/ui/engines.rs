@@ -76,12 +76,22 @@ fn render_list(
         return;
     }
     let visible_rows = usize::from(area.height);
+    // Window the list around the selection: the detail block shrinks the list
+    // area, so a plain `take(visible_rows)` can leave the highlighted mount
+    // off-screen (Enter would still act on it). Rows keep their absolute index
+    // so the selection marker stays correct.
+    let first_row = selected.map_or(0, |selected| {
+        selected.saturating_sub(visible_rows.saturating_sub(1))
+    });
     let lines: Vec<Line<'_>> = model
         .engines
         .iter()
+        .skip(first_row)
         .take(visible_rows)
         .enumerate()
-        .map(|(index, engine)| engine_line(index, selected, engine, theme, area.width))
+        .map(|(offset, engine)| {
+            engine_line(first_row + offset, selected, engine, theme, area.width)
+        })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -146,11 +156,10 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, engine: &EngineInfo, theme: &T
     frame.render_widget(block, area);
 
     let width = usize::from(inner.width);
-    let version = match engine.kv_version {
-        Some(version) => version.to_string(),
-        None if engine.is_kv() => "2".to_owned(),
-        None => NA_VALUE.to_owned(),
-    };
+    // An unreported version is a KV1 mount; show `n/a` rather than inventing one.
+    let version = engine
+        .kv_version
+        .map_or_else(|| NA_VALUE.to_owned(), |version| version.to_string());
     let description = if engine.description.is_empty() {
         NA_VALUE
     } else {
@@ -357,5 +366,47 @@ mod tests {
                 &Theme::default()
             ))
         );
+    }
+
+    #[test]
+    fn engines_detail_for_unversioned_kv_mount_is_unsupported() {
+        // Given: a `kv` mount reporting no version — the shape `vault secrets
+        // enable kv` (without `-version`) produces, which is KV1.
+        let model = EnginesModel {
+            engines: vec![engine("legacykv", "kv", None)],
+            selected: 0,
+        };
+        // When/Then: it is labelled KV v1 with no version, and not browsable.
+        assert_snapshot!(
+            "engines_detail_unversioned_kv_selected",
+            render(60, 12, |f| draw_engines(
+                f,
+                Rect::new(0, 0, 60, 12),
+                &model,
+                &Theme::default()
+            ))
+        );
+    }
+
+    #[test]
+    fn engines_keeps_selected_row_visible_when_detail_block_shrinks_the_list() {
+        // Given: six engines and a 9-row inner area, which the detail block
+        // reduces to a 3-row list; the last engine is selected.
+        let model = EnginesModel {
+            engines: (0..6)
+                .map(|i| engine(&format!("e{i}"), "kv", Some(2)))
+                .collect(),
+            selected: 5,
+        };
+
+        // When: the view is rendered.
+        let out = render(40, 11, |f| {
+            draw_engines(f, Rect::new(0, 0, 40, 11), &model, &Theme::default());
+        });
+
+        // Then: the list scrolls so the selected row stays on screen with its
+        // marker, and the off-window first rows are not drawn.
+        assert!(out.contains(&format!("{SELECTION_MARKER} e5")));
+        assert!(!out.contains("e0"));
     }
 }

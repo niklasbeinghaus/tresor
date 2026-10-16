@@ -72,7 +72,9 @@ pub struct EngineInfo {
     pub name: SecretPath,
     /// Engine type exactly as Vault reports it (`kv`, `cubbyhole`, `transit`, `system`, …).
     pub mount_type: String,
-    /// KV engine version when Vault reports one (`Some(2)` for KV2, `Some(1)` for KV1).
+    /// KV engine version when Vault reports one (`Some(2)` for KV2, `Some(1)` for
+    /// KV1). `None` for a `kv` mount created without an explicit version — which
+    /// the KV backend treats as KV1.
     pub kv_version: Option<u64>,
     /// Opaque engine accessor (safe to display).
     pub accessor: String,
@@ -91,20 +93,27 @@ impl EngineInfo {
         self.mount_type == "kv"
     }
 
-    /// True for a KV1 mount (`kv` reporting version `1`).
+    /// True for a `kv` mount that must be treated as KV1 — an explicit version
+    /// `1`, or no version reported at all.
+    ///
+    /// The KV backend defaults to version 1, so a `kv` mount created without an
+    /// explicit version reports **no** `options.version` (`null`) while its type
+    /// is still `kv`. Verified on Vault 2.1.2 and `OpenBao` 2.0: such a mount
+    /// rejects the KV2 `metadata` endpoint but accepts KV1 reads. Any version
+    /// other than `2` is treated as KV1 as well — the rule fails closed.
     #[must_use]
     pub fn is_kv1(&self) -> bool {
-        self.is_kv() && self.kv_version == Some(1)
+        self.is_kv() && self.kv_version != Some(2)
     }
 
     /// True when the engine can be browsed with the KV2 endpoints.
     ///
-    /// Vault always reports `options.version` for KV mounts; a missing version is
-    /// treated as KV2 (the modern default) so a lenient gateway response never makes
-    /// a browsable mount look unsupported.
+    /// Fails closed: only an explicit version `2` is browsable. Treating an
+    /// unreported version as KV2 would send `{mount}/metadata/...` requests to a
+    /// KV1 mount and produce exactly the confusing 404 this type exists to avoid.
     #[must_use]
     pub fn supports_browsing(&self) -> bool {
-        self.is_kv() && !self.is_kv1()
+        self.is_kv() && self.kv_version == Some(2)
     }
 
     /// Short display label for the engine type, e.g. `kv v2`, `cubbyhole`, `system`.
@@ -113,10 +122,11 @@ impl EngineInfo {
         if !self.is_kv() {
             return self.mount_type.clone();
         }
-        if self.is_kv1() {
-            "kv v1".to_owned()
-        } else {
-            "kv v2".to_owned()
+        match self.kv_version {
+            // An unreported version is a KV1 mount (see `is_kv1`).
+            None | Some(1) => "kv v1".to_owned(),
+            Some(2) => "kv v2".to_owned(),
+            Some(other) => format!("kv v{other}"),
         }
     }
 
@@ -126,10 +136,11 @@ impl EngineInfo {
         if self.supports_browsing() {
             return None;
         }
-        if self.is_kv1() {
+        if self.is_kv() {
             return Some(format!(
-                "'{}' is a KV v1 mount; only KV2 engines can be browsed",
-                self.name.as_str()
+                "'{}' is a {} mount; only KV2 engines can be browsed",
+                self.name.as_str(),
+                self.type_label()
             ));
         }
         Some(format!(
@@ -328,10 +339,18 @@ mod tests {
     }
 
     #[test]
-    fn kv_engine_without_reported_version_is_treated_as_kv2() {
-        let lenient = engine("secret", "kv", None);
-        assert!(lenient.supports_browsing());
-        assert_eq!(lenient.type_label(), "kv v2");
+    fn kv_engine_without_reported_version_is_kv1_and_not_browsable() {
+        // Vault/OpenBao report no `options.version` for a `kv` mount created
+        // without an explicit version, and such a mount is KV1.
+        let unversioned = engine("secret", "kv", None);
+        assert!(unversioned.is_kv());
+        assert!(unversioned.is_kv1());
+        assert!(!unversioned.supports_browsing());
+        assert_eq!(unversioned.type_label(), "kv v1");
+        assert_eq!(
+            unversioned.unsupported_reason().as_deref(),
+            Some("'secret' is a kv v1 mount; only KV2 engines can be browsed")
+        );
     }
 
     #[test]
@@ -342,7 +361,7 @@ mod tests {
         assert_eq!(kv1.type_label(), "kv v1");
         assert_eq!(
             kv1.unsupported_reason().as_deref(),
-            Some("'legacy' is a KV v1 mount; only KV2 engines can be browsed")
+            Some("'legacy' is a kv v1 mount; only KV2 engines can be browsed")
         );
     }
 

@@ -44,13 +44,15 @@ fn mount_response(mount_type: &str, version: Option<&str>) -> Value {
 
 #[tokio::test]
 async fn read_secret_engines_when_mounts_exist_returns_type_and_metadata() {
-    // Given: Vault exposes a KV2 mount and a non-KV mount, and requires the token header.
+    // Given: Vault exposes a KV2 mount, a non-KV mount, and the shape
+    // `vault secrets enable kv` produces (type `kv`, `options: null` = KV1).
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v1/sys/mounts"))
         .and(vault_header())
         .respond_with(ResponseTemplate::new(200).set_body_json(vault_data(json!({
             "secret/": mount_response("kv", Some("2")),
+            "legacy/": mount_response("kv", None),
             "cubbyhole/": mount_response("cubbyhole", None)
         }))))
         .mount(&server)
@@ -65,7 +67,8 @@ async fn read_secret_engines_when_mounts_exist_returns_type_and_metadata() {
 
     // Then: each mount keeps its type/version/TTL metadata, sorted by name with the
     // trailing slash stripped from the mount path.
-    assert_eq!(engines.len(), 2);
+    assert_eq!(engines.len(), 3);
+
     let cubbyhole = engines.first().expect("cubbyhole engine");
     assert_eq!(cubbyhole.name, SecretPath::new("cubbyhole"));
     assert_eq!(cubbyhole.mount_type, "cubbyhole");
@@ -73,7 +76,14 @@ async fn read_secret_engines_when_mounts_exist_returns_type_and_metadata() {
     assert!(!cubbyhole.supports_browsing());
     assert_eq!(cubbyhole.type_label(), "cubbyhole");
 
-    let secret = engines.get(1).expect("secret engine");
+    let legacy = engines.get(1).expect("legacy engine");
+    assert_eq!(legacy.name, SecretPath::new("legacy"));
+    assert_eq!(legacy.kv_version, None);
+    assert!(legacy.is_kv1());
+    assert!(!legacy.supports_browsing());
+    assert_eq!(legacy.type_label(), "kv v1");
+
+    let secret = engines.get(2).expect("secret engine");
     assert_eq!(
         *secret,
         EngineInfo {
